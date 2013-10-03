@@ -64,8 +64,40 @@ end
 #   | s_colon_bracket(l, obj, field) =>
 # end
 
+fun augment(ast-expr :: A.Expr) -> A.Expr:
+  var node-id = 0
+  fun augment-local(ast :: A.Expr) -> A.Expr:
+    node-id := node-id + 1
+    cases(A.Expr) ast:
+      | s_block(l, stmts) =>
+        A.s_block(l, stmts.map(augment-local)).{node-id: node-id}
+      | s_user_block(l, block) =>
+        A.s_user_block(l,augment-local(block)).{node-id: node-id}
+      | s_var(l, name, val) =>
+        A.s_var(l,name, augment-local(val)).{node-id: node-id}
+      | s_let(l, name, val) =>
+        A.s_let(l,name, augment-local(val)).{node-id: node-id}
+      | s_assign(l, id, val) =>
+        A.s_assign(l, id, augment-local(val)).{node-id: node-id}
+      # | TODO(dbp 2013-10-02)
+      # | s_if(l, branches) =>
+      # | s_lam(l, ps, args, ann, doc, body, ck) =>
+      # | s_method(l, args, ann, doc, body, ck) =>
+      # | s_extend(l, super, fields) =>
+      # | s_update(l, super, fields) =>
+      # | s_obj(l, fields) =>
+      # | s_app(r, fn, args) =>
+      # | s_get_bang(l, obj, str) =>
+      # | s_bracket(l, obj, field) =>
+      # | s_colon_bracket(l, obj, field) =>
+      | else => ast.{node-id: node-id}
+    end
+  end
+  augment-local(ast-expr)
+end
+
 fun tc-prog(prog :: A.Program, env):
-  tc(prog.block, env)
+  tc(augment(prog.block), env)
   prog
 end
 
