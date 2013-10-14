@@ -5,8 +5,6 @@ import ast as A
 import directory as D
 import file as F
 
-List = list.List
-
 # This isn't actually sufficient; should be a list of K,V pairs
 data Pair:
   | pair(a,b)
@@ -108,7 +106,7 @@ fun get-type(ann :: A.Ann) -> Type:
     | a_any => top-type
     | a_name(l, id) => baseType(baseTag(id), [])
     | a_arrow(l, args, ret) => arrowType(args.map(get-type), get-type(ret))
-    | a_record(l, fields) => baseType(topTag, fields.map(fun(name,fann): pair(name, get-type(fann)) end))
+    | a_record(l, fields) => baseType(topTag, fields.map(fun(field): pair(field.name, get-type(field.ann)) end))
   end
 end
 
@@ -142,7 +140,12 @@ fun subtype(child :: Type, parent :: Type) -> Bool:
     (parentT == topTag) or (childT == parentT)
   end
   fun record-subtype(childR :: Map<String,Type>, parentR :: Map<String,Type>) -> Bool:
-    true
+    for fold(rv from true, fld from parentR):
+      cases(option.Option) map-get(childR, fld.a):
+        | none => false
+        | some(cty) => rv and (subtype(cty, fld.b))
+      end
+    end
   end
   cases(Type) parent:
     | baseType(parenttags, parentrecord) =>
@@ -150,6 +153,46 @@ fun subtype(child :: Type, parent :: Type) -> Bool:
         | baseType(childtags, childrecord) =>
           tag-subtype(childtags, parenttags) and record-subtype(childrecord, parentrecord)
       end
+  end
+where:
+  topType = baseType(topTag, [])
+  subtype(topType, topType) is true
+  numType = baseType(baseTag("Number"), [])
+  subtype(numType, topType) is true
+  subtype(topType, numType) is false
+
+  fun recType(flds): baseType(topTag, flds) end
+
+  subtype(recType([pair("foo", topType)]), topType) is true
+  subtype(recType([pair("foo", topType)]), recType([pair("foo", topType)])) is true
+  subtype(recType([pair("foo", topType)]), recType([pair("foo", numType)])) is false
+  subtype(recType([pair("foo", numType)]), recType([pair("foo", topType)])) is true
+  subtype(recType([]), recType([pair("foo", numType)])) is false
+  subtype(recType([pair("foo", numType), pair("bar", topType)]), recType([pair("foo", topType)])) is true
+end
+
+fun type-record-add(orig :: Type, field :: String, type :: Type) -> Type:
+  cases(Type) orig:
+    | baseType(tags, record) => baseType(tags, [pair(field, type)] + record)
+  end
+where:
+  top-type = baseType(topTag, [])
+  type-record-add(baseType(topTag, []), "foo", top-type) is baseType(topTag, [pair("foo", top-type)])
+end
+
+fun tc-member(ast :: A.Member, env) -> Option<Pair<String,Type>>:
+  cases(A.Member) ast:
+    | s_data_field(l, name, value) =>
+      # NOTE(dbp 2013-10-14): This is a bummer, but if it isn't
+      # immediately obviously a string, not sure what to do.
+      cases(A.Expr) name:
+        | s_str(l1, s) => some(pair(s, tc(value, env)))
+        | else => none
+      end
+    | else => none
+    # | s_mutable_field(l, name, ann, value)
+    # | s_once_field(l, name, ann, value)
+    # | s_method_field(
   end
 end
 
@@ -173,7 +216,17 @@ fun tc(ast :: A.Expr, env) -> Type:
     | s_if(l, branches) => top-type
     | s_lam(l, ps, args, ann, doc, body, ck) => top-type
     | s_method(l, args, ann, doc, body, ck) => top-type
-    | s_extend(l, super, fields) => top-type
+    | s_extend(l, super, fields) =>
+      base = tc-curried(super)
+      for fold(ty from base, fld from fields):
+        cases(option.Option) tc-member(fld, env):
+            # NOTE(dbp 2013-10-14): this seems really bad... as we're
+            # saying that if we can't figure it out, you can't use it...
+          | none => ty
+          | some(fldty) =>
+            type-record-add(ty, fldty.a, fldty.b)
+        end
+      end
     | s_update(l, super, fields) => top-type
     | s_obj(l, fields) => top-type
     | s_app(r, fn, args) => top-type
@@ -228,17 +281,19 @@ D.dir("tests").list().map(fun(path):
       # file. If it is empty, we expect the value that comes out of the .arr to match the
       # value that comes from the .out. Obviously, the .out files should be much simpler than
       # the .arr files.
-      outpath = strip-ext(path) + ".out"
-      errpath = strip-ext(path) + ".err"
+      stripped = strip-ext(path)
+      print("Running " + stripped)
+      outpath = stripped + ".out"
+      errpath = stripped + ".err"
       code = F.input-file(build-path(["tests", path])).read-file()
       out = F.input-file(build-path(["tests", outpath])).read-file()
       err = F.input-file(build-path(["tests", errpath])).read-file()
       check:
-        if err.length() <> 0:
-          eval-str(path, code) raises err
-        else:
-          eval-str(path, code) is eval-str(outpath, out)
-        end
+      if err.length() <> 0:
+        eval-str(path, code) raises err
+      else:
+        eval-str(path, code) is eval-str(outpath, out)
       end
     end
-  end)
+  end
+end)
