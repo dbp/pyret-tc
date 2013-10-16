@@ -30,7 +30,7 @@ end
 
 data Type:
   | baseType(tags :: TagType, record :: RecordType)
-  | arrowType(args :: List<Type>, ret :: Type)
+  | arrowType(args :: List<Type>, ret :: Type, record :: RecordType)
 end
 
 data TagType:
@@ -118,27 +118,34 @@ fun get-type(ann :: A.Ann) -> Type:
   end
 end
 
-fun get-bindings(ast :: A.Expr) -> List<Pair<String, Ty>>:
+fun get-bindings(ast :: A.Expr, env) -> List<Pair<String, Type>>:
+  doc: "This function implements let* like behavior"
   cases(A.Expr) ast:
-    | s_block(l, stmts) => stmts.map(get-bindings)^concat()
-    | s_user_block(l, block) => get-bindings(block)
-    | s_var(l, name, val) => [pair(name.id, get-type(name.ann))]
-    | s_let(l, name, val) => [pair(name.id, get-type(name.ann))]
-    | s_assign(l, id, val) => []
-    | s_if(l, branches) => branches.map(get-bindings)^concat()
-    | s_lam(l, ps, args, ann, doc, body, ck) => []
-    | s_method(l, args, ann, doc, body, ck) => []
-    | s_extend(l, super, fields) => []
-    | s_update(l, super, fields) => []
-    | s_obj(l, fields) => []
-    | s_app(r, fn, args) => []
-    | s_id(l, id) => []
-    | s_num(l, num) => []
-    | s_bool(l, bool) => []
-    | s_str(l, str) => []
-    | s_get_bang(l, obj, str) => []
-    | s_bracket(l, obj, field) => []
-    | s_colon_bracket(l, obj, field) => []
+    | s_block(l, stmts) => stmts.foldl(fun(stmt, newenv): get-bindings(stmt, newenv) end, env)
+    | s_user_block(l, block) => get-bindings(block, env)
+      # NOTE(dbp 2013-10-16): Which should we do - val or ann?
+    | s_var(l, name, val) =>
+      env + [pair(name.id, tc(val, env))] #get-type(name.ann))]
+    | s_let(l, name, val) =>
+      env + [pair(name.id, tc(val, env))] #get-type(name.ann))]
+    | s_if(l, branches) =>
+      # NOTE(dbp 2013-10-16): Adds a bunch of copies of env... woops
+      branches.map(get-bindings(_,env))^concat()
+    | else => env
+    # | s_assign(l, id, val) => []
+    # | s_lam(l, ps, args, ann, doc, body, ck) => []
+    # | s_method(l, args, ann, doc, body, ck) => []
+    # | s_extend(l, super, fields) => []
+    # | s_update(l, super, fields) => []
+    # | s_obj(l, fields) => []
+    # | s_app(r, fn, args) => []
+    # | s_id(l, id) => []
+    # | s_num(l, num) => []
+    # | s_bool(l, bool) => []
+    # | s_str(l, str) => []
+    # | s_get_bang(l, obj, str) => []
+    # | s_bracket(l, obj, field) => []
+    # | s_colon_bracket(l, obj, field) => []
   end
 end
 
@@ -234,7 +241,7 @@ end
 
 fun tc(ast :: A.Expr, env) -> Type:
   top-type = baseType(topTag, moreRecord([]))
-  newenv = env.append(get-bindings(ast))
+  newenv = get-bindings(ast,env)
   tc-curried = fun(expr): tc(expr, newenv) end
   cases(A.Expr) ast:
     | s_block(l, stmts) => stmts.map(tc-curried).last()
@@ -255,7 +262,7 @@ fun tc(ast :: A.Expr, env) -> Type:
     | s_extend(l, super, fields) =>
       base = tc-curried(super)
       for fold(ty from base, fld from fields):
-        cases(option.Option) tc-member(fld, env):
+        cases(option.Option) tc-member(fld, newenv):
             # NOTE(dbp 2013-10-14): this seems really bad... as we're
             # saying that if we can't figure it out, you can't use it...
           | none => ty
@@ -264,11 +271,19 @@ fun tc(ast :: A.Expr, env) -> Type:
         end
       end
     | s_update(l, super, fields) => top-type
-    | s_obj(l, fields) => top-type # FIXME(dbp 2013-10-16): top-type is WRONG
+    | s_obj(l, fields) =>
+      baseType(botTag, for fold(acc from normalRecord([]), f from fields):
+          cases(option.Option) tc-member(f, newenv):
+            | none => moreRecord(acc.fields)
+              # NOTE(dbp 2013-10-16): This is a little bit of a hack -
+              # to reuse the helper that wants to operate on types.
+            | some(fty) => type-record-add(baseType(topTag,acc), fty.a, fty.b).record
+          end
+        end)
     | s_app(r, fn, args) => top-type
     | s_id(l, id) =>
-          # we won't actually get here, because we do unboundness typechecking already
       cases(option.Option) map-get(newenv, id):
+        # we won't actually get here, because we do unboundness typechecking already
         | none => raise("Type error: " + id + " not bound (" + tostring(l) + ")")
         | some(ty) => ty
       end
@@ -276,7 +291,24 @@ fun tc(ast :: A.Expr, env) -> Type:
     | s_bool(l, bool) => baseType(baseTag("Bool"), moreRecord([]))
     | s_str(l, str) => baseType(baseTag("String"), moreRecord([]))
     | s_get_bang(l, obj, str) => top-type
-    | s_bracket(l, obj, field) => top-type
+    | s_bracket(l, obj, field) =>
+      cases(A.Expr) field:
+        | s_str(l1, s) =>
+          cases(RecordType) tc-curried(obj).record:
+            | normalRecord(fields) =>
+              cases(option.Option) map-get(fields, s):
+                | none => raise("Type error: field " + s + " not found on object at " + tostring(l))
+                | some(ty) => ty
+              end
+            | moreRecord(fields) =>
+              cases(option.Option) map-get(fields, s):
+                | none => top-type # NOTE(dbp 2013-10-16): this should be a warning probably
+                | some(ty) => ty
+              end
+          end
+        # NOTE(dbp 2013-10-16): This is unfortunate, but...
+        | else => top-type
+      end
     | s_colon_bracket(l, obj, field) => top-type
   end
 end
@@ -315,15 +347,23 @@ end
 var files = []
 baseR = Racket("racket/base")
 cmdlineargs = baseR("current-command-line-arguments")
-if baseR("vector-length", cmdlineargs) == 2:
-  # invoke like:
-  # raco pyret tc.arr filename.arr
-  files := [baseR("vector-ref", cmdlineargs, 1)]
-else:
-  files := D.dir("tests").list().map(fun(path): build-path(["tests", path]) end)
+fun usage():
+  print("Usage:\n    raco pyret tc.arr tests (runs all tests)\n    raco pyret tc.arr file.arr (runs single file)\n\n(running basic unit tests)\n")
 end
+cmdlinelen = baseR("vector-length",cmdlineargs)
+if cmdlinelen == 0:
+  usage()
+else:
+  mode = baseR("vector-ref", cmdlineargs, cmdlinelen - 1)
+  if mode == "tests":
+    files := D.dir("tests").list().map(fun(path): build-path(["tests", path]) end)
+  else if baseR("file-exists?", mode) and (not str-ends-with(mode, "tc.arr")):
+    files := [mode]
+  else:
+    usage()
+  end
 
-check:
+  check:
   files.map(fun(path):
       when is-code-file(path):
         # NOTE(dbp 2013-09-29):
@@ -346,4 +386,5 @@ check:
         end
       end
     end)
+  end
 end
