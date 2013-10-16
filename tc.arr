@@ -28,15 +28,22 @@ where:
 end
 
 data Type:
-  | baseType(tags :: Tag, record :: Map<String,Ty>)
+  | baseType(tags :: TagType, record :: RecordType)
   | arrowType(args :: List<Type>, ret :: Type)
 end
 
-data Tag:
+data TagType:
   | topTag
   | botTag
   | baseTag(name :: String)
   | unionTag(ts :: List<Tag>)
+end
+
+data RecordType:
+  | normalRecord(fields :: Map<String,Type>)
+    # NOTE(dbp 2013-10-16): For when we know there are more fields, but aren't sure what they are.
+    # this happens because of computed field names.
+  | moreRecord(fields :: Map<String,Type>)
 end
 
 # Template for structural recursion
@@ -100,13 +107,13 @@ fun tc-prog(prog :: A.Program, env):
 end
 
 fun get-type(ann :: A.Ann) -> Type:
-  top-type = baseType(topTag, [])
+  top-type = baseType(topTag, moreRecord([]))
   cases(A.Ann) ann:
     | a_blank => top-type
     | a_any => top-type
-    | a_name(l, id) => baseType(baseTag(id), [])
+    | a_name(l, id) => baseType(baseTag(id), moreRecord([]))
     | a_arrow(l, args, ret) => arrowType(args.map(get-type), get-type(ret))
-    | a_record(l, fields) => baseType(topTag, fields.map(fun(field): pair(field.name, get-type(field.ann)) end))
+    | a_record(l, fields) => baseType(topTag, normalRecord(fields.map(fun(field): pair(field.name, get-type(field.ann)) end)))
   end
 end
 
@@ -135,16 +142,36 @@ fun get-bindings(ast :: A.Expr) -> List<Pair<String, Ty>>:
 end
 
 fun subtype(child :: Type, parent :: Type) -> Bool:
-  fun tag-subtype(childT :: Tag, parentT :: Tag) -> Bool:
+  fun tag-subtype(childT :: TagType, parentT :: TagType) -> Bool:
     # not real yet
     (parentT == topTag) or (childT == parentT)
   end
-  fun record-subtype(childR :: Map<String,Type>, parentR :: Map<String,Type>) -> Bool:
-    for fold(rv from true, fld from parentR):
-      cases(option.Option) map-get(childR, fld.a):
+  fun record-subtype(childR :: RecordType, parentR :: RecordType) -> Bool:
+    fun match-child(parent-fields, child-fields):
+      for fold(rv from true, fld from parent-fields):
+      cases(option.Option) map-get(child-fields, fld.a):
         | none => false
         | some(cty) => rv and (subtype(cty, fld.b))
       end
+    end
+    end
+    cases(RecordType) parentR:
+      | normalRecord(p-fields) =>
+        cases(RecordType) childR:
+          | normalRecord(c-fields) =>
+            match-child(p-fields, c-fields)
+          | moreRecord(c-fields) =>
+            # TODO(dbp 2013-10-16): figure out what to do about more
+            match-child(p-fields, c-fields)
+        end
+      | moreRecord(p-fields) =>
+        cases(RecordType) childR:
+          | normalRecord(c-fields) =>
+            match-child(p-fields, c-fields)
+          | moreRecord(c-fields) =>
+            # TODO(dbp 2013-10-16): figure out what to do about more
+            match-child(p-fields, c-fields)
+        end
     end
   end
   cases(Type) parent:
@@ -155,13 +182,13 @@ fun subtype(child :: Type, parent :: Type) -> Bool:
       end
   end
 where:
-  topType = baseType(topTag, [])
+  topType = baseType(topTag, moreRecord([]))
   subtype(topType, topType) is true
-  numType = baseType(baseTag("Number"), [])
+  numType = baseType(baseTag("Number"), moreRecord([]))
   subtype(numType, topType) is true
   subtype(topType, numType) is false
 
-  fun recType(flds): baseType(topTag, flds) end
+  fun recType(flds): baseType(topTag, normalRecord(flds)) end
 
   subtype(recType([pair("foo", topType)]), topType) is true
   subtype(recType([pair("foo", topType)]), recType([pair("foo", topType)])) is true
@@ -173,11 +200,19 @@ end
 
 fun type-record-add(orig :: Type, field :: String, type :: Type) -> Type:
   cases(Type) orig:
-    | baseType(tags, record) => baseType(tags, [pair(field, type)] + record)
+    | baseType(tags, record) =>
+      cases(RecordType) record:
+        | normalRecord(fields) =>
+          baseType(tags, normalRecord([pair(field, type)] + fields))
+        | moreRecord(fields) =>
+          baseType(tags, moreRecord([pair(field, type)] + fields))
+      end
   end
 where:
-  top-type = baseType(topTag, [])
-  type-record-add(baseType(topTag, []), "foo", top-type) is baseType(topTag, [pair("foo", top-type)])
+  my-type = baseType(topTag, normalRecord([]))
+  type-record-add(my-type, "foo", my-type) is baseType(topTag, normalRecord([pair("foo", my-type)]))
+  my-more-type = baseType(topTag, moreRecord([]))
+  type-record-add(my-more-type, "foo", my-type) is baseType(topTag, moreRecord([pair("foo", my-type)]))
 end
 
 fun tc-member(ast :: A.Member, env) -> Option<Pair<String,Type>>:
@@ -197,7 +232,7 @@ fun tc-member(ast :: A.Member, env) -> Option<Pair<String,Type>>:
 end
 
 fun tc(ast :: A.Expr, env) -> Type:
-  top-type = baseType(topTag, [])
+  top-type = baseType(topTag, moreRecord([]))
   newenv = env.append(get-bindings(ast))
   tc-curried = fun(expr): tc(expr, newenv) end
   cases(A.Expr) ast:
@@ -228,7 +263,7 @@ fun tc(ast :: A.Expr, env) -> Type:
         end
       end
     | s_update(l, super, fields) => top-type
-    | s_obj(l, fields) => top-type
+    | s_obj(l, fields) => top-type # FIXME(dbp 2013-10-16): top-type is WRONG
     | s_app(r, fn, args) => top-type
     | s_id(l, id) =>
           # we won't actually get here, because we do unboundness typechecking already
@@ -236,9 +271,9 @@ fun tc(ast :: A.Expr, env) -> Type:
         | none => raise("Type error: " + id + " not bound (" + tostring(l) + ")")
         | some(ty) => ty
       end
-    | s_num(l, num) => baseType(baseTag("Number"), [])
-    | s_bool(l, bool) => baseType(baseTag("Bool"), [])
-    | s_str(l, str) => baseType(baseTag("String"), [])
+    | s_num(l, num) => baseType(baseTag("Number"), moreRecord([]))
+    | s_bool(l, bool) => baseType(baseTag("Bool"), moreRecord([]))
+    | s_str(l, str) => baseType(baseTag("String"), moreRecord([]))
     | s_get_bang(l, obj, str) => top-type
     | s_bracket(l, obj, field) => top-type
     | s_colon_bracket(l, obj, field) => top-type
@@ -267,7 +302,7 @@ end
 
 fun eval-str(p, s):
   default-env = {list: list, error: error}
-  top-type = baseType(topTag, [])
+  top-type = baseType(topTag, moreRecord([]))
   type-env = [pair("Any", top-type)]
   prog = s^A.parse(p, { ["check"]: false}).post-desugar^tc-prog(type-env)
   E.eval(prog^A.to-native(), default-env, {})
