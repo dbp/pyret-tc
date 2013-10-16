@@ -4,6 +4,7 @@ import pyret-eval as E
 import ast as A
 import directory as D
 import file as F
+import Racket as Racket
 
 # This isn't actually sufficient; should be a list of K,V pairs
 data Pair:
@@ -303,32 +304,46 @@ end
 fun eval-str(p, s):
   default-env = {list: list, error: error}
   top-type = baseType(topTag, moreRecord([]))
-  type-env = [pair("Any", top-type)]
+  type-env = [pair("Any", top-type), pair("list", baseType(botTag, moreRecord([pair("map", top-type)])))]
   prog = s^A.parse(p, { ["check"]: false}).post-desugar^tc-prog(type-env)
   E.eval(prog^A.to-native(), default-env, {})
 end
 
-D.dir("tests").list().map(fun(path):
-    when is-code-file(path):
-      # NOTE(dbp 2013-09-29):
-      # We run the .arr file. It expects to have a corresponding .out and .err files.
-      # if .err is non-empty, we expect to see an error that matches the content of that
-      # file. If it is empty, we expect the value that comes out of the .arr to match the
-      # value that comes from the .out. Obviously, the .out files should be much simpler than
-      # the .arr files.
-      stripped = strip-ext(path)
-      print("Running " + stripped)
-      outpath = stripped + ".out"
-      errpath = stripped + ".err"
-      code = F.input-file(build-path(["tests", path])).read-file()
-      out = F.input-file(build-path(["tests", outpath])).read-file()
-      err = F.input-file(build-path(["tests", errpath])).read-file()
-      check:
-      if err.length() <> 0:
-        eval-str(path, code) raises err
-      else:
-        eval-str(path, code) is eval-str(outpath, out)
+
+
+# commandline invocation
+var files = []
+baseR = Racket("racket/base")
+cmdlineargs = baseR("current-command-line-arguments")
+if baseR("vector-length", cmdlineargs) == 2:
+  # invoke like:
+  # raco pyret tc.arr filename.arr
+  files := [baseR("vector-ref", cmdlineargs, 1)]
+else:
+  files := D.dir("tests").list().map(fun(path): build-path(["tests", path]) end)
+end
+
+check:
+  files.map(fun(path):
+      when is-code-file(path):
+        # NOTE(dbp 2013-09-29):
+        # We run the .arr file. It expects to have a corresponding .out and .err files.
+        # if .err is non-empty, we expect to see an error that matches the content of that
+        # file. If it is empty, we expect the value that comes out of the .arr to match the
+        # value that comes from the .out. Obviously, the .out files should be much simpler than
+        # the .arr files.
+        stripped = strip-ext(path)
+        print("Running " + stripped)
+        outpath = stripped + ".out"
+        errpath = stripped + ".err"
+        code = F.input-file(path).read-file()
+        out = F.input-file(outpath).read-file()
+        err = F.input-file(errpath).read-file()
+        if err.length() <> 0:
+          eval-str(path, code) raises err
+        else:
+          eval-str(path, code) is eval-str(outpath, out)
+        end
       end
-    end
-  end
-end)
+    end)
+end
