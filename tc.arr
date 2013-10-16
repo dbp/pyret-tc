@@ -6,10 +6,10 @@ import directory as D
 import file as F
 import Racket as Racket
 
-# This isn't actually sufficient; should be a list of K,V pairs
 data Pair:
   | pair(a,b)
 end
+# This isn't actually sufficient; should be a list of K,V pairs
 fun <K,V> Map(o): List(o) end
 fun <K,V> map-get(m :: Map<K,V>, k :: K) -> option.Option<V>:
   cases(List) m:
@@ -123,11 +123,19 @@ fun get-bindings(ast :: A.Expr, env) -> List<Pair<String, Type>>:
   cases(A.Expr) ast:
     | s_block(l, stmts) => stmts.foldl(fun(stmt, newenv): get-bindings(stmt, newenv) end, env)
     | s_user_block(l, block) => get-bindings(block, env)
-      # NOTE(dbp 2013-10-16): Which should we do - val or ann?
+      # NOTE(dbp 2013-10-16): I'm using the ann if it exists, otherwise the value.
     | s_var(l, name, val) =>
-      env + [pair(name.id, tc(val, env))] #get-type(name.ann))]
+      if A.is-a_blank(name.ann):
+        env + [pair(name.id, tc(val, env))]
+      else:
+        env + [pair(name.id, get-type(name.ann))]
+      end
     | s_let(l, name, val) =>
-      env + [pair(name.id, tc(val, env))] #get-type(name.ann))]
+      if A.is-a_blank(name.ann):
+        env + [pair(name.id, tc(val, env))]
+      else:
+        env + [pair(name.id, get-type(name.ann))]
+      end
     | s_if(l, branches) =>
       # NOTE(dbp 2013-10-16): Adds a bunch of copies of env... woops
       branches.map(get-bindings(_,env))^concat()
