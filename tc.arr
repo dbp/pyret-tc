@@ -155,6 +155,16 @@ fun get-bindings(ast :: A.Expr, env) -> List<Pair<String, Type>>:
     # | s_bracket(l, obj, field) => []
     # | s_colon_bracket(l, obj, field) => []
   end
+where:
+  fun gb-src(src):
+    get-bindings(A.parse(src,"anonymous-file", { ["check"]: false}).post-desugar.block, [])
+  end
+  fun name-ty(name):
+    baseType(baseTag("Number"), moreRecord([]))
+  end
+  gb-src("x = 2") is [pair("x", name-ty("Number"))]
+  gb-src("x = 2 y = x") is [pair("x", name-ty("Number")),
+                            pair("y", name-ty("Number"))]
 end
 
 fun subtype(child :: Type, parent :: Type) -> Bool:
