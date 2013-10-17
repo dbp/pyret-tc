@@ -29,6 +29,7 @@ where:
 end
 
 data Type:
+  | dynType
   | baseType(tags :: TagType, record :: RecordType)
   | arrowType(args :: List<Type>, ret :: Type, record :: RecordType)
 end
@@ -108,13 +109,13 @@ fun tc-prog(prog :: A.Program, env):
 end
 
 fun get-type(ann :: A.Ann) -> Type:
-  top-type = baseType(topTag, moreRecord([]))
   cases(A.Ann) ann:
-    | a_blank => top-type
-    | a_any => top-type
+    | a_blank => dynType
+    | a_any => dynType
     | a_name(l, id) => baseType(baseTag(id), moreRecord([]))
-    | a_arrow(l, args, ret) => arrowType(args.map(get-type), get-type(ret))
+    | a_arrow(l, args, ret) => arrowType(args.map(get-type), get-type(ret), moreRecord([]))
     | a_record(l, fields) => baseType(topTag, normalRecord(fields.map(fun(field): pair(field.name, get-type(field.ann)) end)))
+    | else => dynType
   end
 end
 
@@ -201,8 +202,19 @@ fun subtype(child :: Type, parent :: Type) -> Bool:
     end
   end
   cases(Type) parent:
+    | dynType => true
+    | arrowType(parentargs, parentret, parentrecord) =>
+      cases(Type) child:
+        | dynType => true
+        | arrowType(childargs, childret, childrecord) =>
+          for fold2(wt from subtype(childret, parentret), ct from childargs, pt from parentargs):
+            wt and subtype(pt, ct)
+          end
+        | else => false
+      end
     | baseType(parenttags, parentrecord) =>
       cases(Type) child:
+        | dynType => true
         | baseType(childtags, childrecord) =>
           tag-subtype(childtags, parenttags) and record-subtype(childrecord, parentrecord)
       end
@@ -233,6 +245,9 @@ fun type-record-add(orig :: Type, field :: String, type :: Type) -> Type:
         | moreRecord(fields) =>
           baseType(tags, moreRecord([pair(field, type)] + fields))
       end
+      # NOTE(dbp 2013-10-16): Can we start treating this as something
+      # better? moreRecord or something?
+    | dynType => dynType
   end
 where:
   my-type = baseType(topTag, normalRecord([]))
@@ -264,7 +279,7 @@ fun tc(ast :: A.Expr, env) -> Type:
   cases(A.Expr) ast:
     | s_block(l, stmts) => stmts.map(tc-curried).last()
     | s_user_block(l, block) => tc-curried(block)
-    | s_var(l, name, val) => top-type
+    | s_var(l, name, val) => dynType
     | s_let(l, name, val) =>
       ty = tc-curried(val)
       bindty = get-type(name.ann)
@@ -273,10 +288,20 @@ fun tc(ast :: A.Expr, env) -> Type:
       else:
         ty
       end
-    | s_assign(l, id, val) => top-type
-    | s_if(l, branches) => top-type
-    | s_lam(l, ps, args, ann, doc, body, ck) => top-type
-    | s_method(l, args, ann, doc, body, ck) => top-type
+    | s_assign(l, id, val) => dynType
+    | s_if(l, branches) => dynType
+    | s_lam(l, ps, args, ann, doc, body, ck) =>
+      new-env = args.map(fun(b): pair(b.id, get-type(b.ann)) end) + env
+      body-ty = tc(body, new-env)
+      if subtype(body-ty, get-type(ann)):
+        arrowType(args.map(fun(b): get-type(b.ann) end), get-type(ann), moreRecord([]))
+      else:
+        raise("Type error: the body of the function at " + tostring(l) +
+          " had type " + tostring(body-ty) +
+          ", which isn't a subtype of the functions return type, " +
+          tostring(ann))
+      end
+    | s_method(l, args, ann, doc, body, ck) => dynType
     | s_extend(l, super, fields) =>
       base = tc-curried(super)
       for fold(ty from base, fld from fields):
@@ -288,7 +313,7 @@ fun tc(ast :: A.Expr, env) -> Type:
             type-record-add(ty, fldty.a, fldty.b)
         end
       end
-    | s_update(l, super, fields) => top-type
+    | s_update(l, super, fields) => dynType
     | s_obj(l, fields) =>
       baseType(botTag, for fold(acc from normalRecord([]), f from fields):
           cases(option.Option) tc-member(f, newenv):
@@ -298,7 +323,27 @@ fun tc(ast :: A.Expr, env) -> Type:
             | some(fty) => type-record-add(baseType(topTag,acc), fty.a, fty.b).record
           end
         end)
-    | s_app(r, fn, args) => top-type
+    | s_app(l, fn, args) =>
+      fn-ty = tc-curried(fn)
+      cases(Type) fn-ty:
+        | arrowType(arg-types, ret-type, rec-type) =>
+          if args.length() <> arg-types.length():
+            raise("Type error: arity mismatch at " + tostring(l))
+          else:
+            arg-vals = args.map(tc-curried)
+            var counter = 1
+            for map2(at from arg-types, av from arg-vals):
+              when not subtype(av, at):
+                raise("Type error: the " + tostring(counter) + " function argument is of the wrong type. Expected " + tostring(at) + ", but got " + tostring(av))
+              end
+            end
+            ret-type
+          end
+          # NOTE(dbp 2013-10-16): Not really anything we can do. Odd, but...
+        | dynType => dynType
+        | else =>
+          raise("Type error: applying a non-function with type " + torepr(fn-ty) + " at " + tostring(l))
+      end
     | s_id(l, id) =>
       cases(option.Option) map-get(newenv, id):
         # we won't actually get here, because we do unboundness typechecking already
@@ -308,26 +353,30 @@ fun tc(ast :: A.Expr, env) -> Type:
     | s_num(l, num) => baseType(baseTag("Number"), moreRecord([]))
     | s_bool(l, bool) => baseType(baseTag("Bool"), moreRecord([]))
     | s_str(l, str) => baseType(baseTag("String"), moreRecord([]))
-    | s_get_bang(l, obj, str) => top-type
+    | s_get_bang(l, obj, str) => dynType
     | s_bracket(l, obj, field) =>
       cases(A.Expr) field:
         | s_str(l1, s) =>
-          cases(RecordType) tc-curried(obj).record:
-            | normalRecord(fields) =>
-              cases(option.Option) map-get(fields, s):
-                | none => raise("Type error: field " + s + " not found on object at " + tostring(l))
-                | some(ty) => ty
-              end
-            | moreRecord(fields) =>
-              cases(option.Option) map-get(fields, s):
-                | none => top-type # NOTE(dbp 2013-10-16): this should be a warning probably
-                | some(ty) => ty
+          obj-ty = tc-curried(obj)
+          cases(Type) obj-ty:
+            | dynType => dynType
+            | else =>
+              cases(RecordType) obj-ty.record:
+                | normalRecord(fields) =>
+                  cases(option.Option) map-get(fields, s):
+                    | none => raise("Type error: field " + s + " not found on object at " + tostring(l))
+                    | some(ty) => ty
+                  end
+                | moreRecord(fields) =>
+                  cases(option.Option) map-get(fields, s):
+                    | none => dynType # NOTE(dbp 2013-10-16): this should be a warning probably
+                    | some(ty) => ty
+                  end
               end
           end
-        # NOTE(dbp 2013-10-16): This is unfortunate, but...
-        | else => top-type
+        | else => dynType
       end
-    | s_colon_bracket(l, obj, field) => top-type
+    | s_colon_bracket(l, obj, field) => dynType
   end
 end
 
