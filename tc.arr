@@ -5,11 +5,25 @@ import ast as A
 import directory as D
 import file as F
 import Racket as Racket
+Loc = error.Location
+
+data Result:
+  | result(ast :: A.Program, query :: (NodeId -> Type),
+           errors :: List<TypeError>, warnings :: List<TypeWarning>)
+end
+
+data TypeError:
+  | typeError(location :: Loc, message :: String)
+end
+
+data TypeWarning:
+  | typeWarning(location :: Loc, message :: String)
+end
 
 data Pair:
   | pair(a,b)
 end
-# This isn't actually sufficient; should be a list of K,V pairs
+NodeId = is-number
 fun <K,V> Map(o): List(o) end
 fun <K,V> map-get(m :: Map<K,V>, k :: K) -> option.Option<V>:
   cases(List) m:
@@ -47,6 +61,32 @@ data RecordType:
     # this happens because of computed field names.
   | moreRecord(fields :: Map<String,Type>)
 end
+
+# NOTE(dbp 2013-10-17): Report data structure, the return type of tc
+data TCResult:
+  | tcResult(type :: Type, errors :: List<TypeError>, warnings :: List<TypeWarning>) with:
+    set-type(self, ty :: Type):
+      tcResult(ty, self.errors, self.warnings)
+    end,
+    add-error(self, er :: TypeError):
+      tcResult(self.type, self.errors + [er], self.warnings)
+    end,
+    add-warning(self, wn :: TypeWarning):
+      tcResult(self.type, self.errors, self.warnings + [wn])
+    end,
+    merge-messages(self, other :: TCResult):
+      tcResult(self.type, self.errors + other.errors, self.warnings + other.warnings)
+    end
+sharing:
+  tostring(self):
+    if (self.errors.length() == 0) and (self.warnings.length() == 0):
+      "No type errors detected."
+    else:
+      "Errors:\n" + torepr(self.errors) + "\n\nWarnings:\n " + torepr(self.warnings)
+    end
+  end
+end
+
 
 # Template for structural recursion
 # cases(A.Expr) get-expr(ast):
@@ -105,7 +145,6 @@ end
 
 fun tc-prog(prog :: A.Program, env):
   tc(augment(prog.block), env)
-  prog
 end
 
 fun get-type(ann :: A.Ann) -> Type:
@@ -120,20 +159,20 @@ fun get-type(ann :: A.Ann) -> Type:
 end
 
 fun get-bindings(ast :: A.Expr, env) -> List<Pair<String, Type>>:
-  doc: "This function implements let* like behavior"
+  doc: "This function implements letrec behavior"
   cases(A.Expr) ast:
     | s_block(l, stmts) => stmts.foldl(fun(stmt, newenv): get-bindings(stmt, newenv) end, env)
     | s_user_block(l, block) => get-bindings(block, env)
       # NOTE(dbp 2013-10-16): I'm using the ann if it exists, otherwise the value.
     | s_var(l, name, val) =>
       if A.is-a_blank(name.ann):
-        env + [pair(name.id, tc(val, env))]
+        env + [pair(name.id, tc(val, env).type)]
       else:
         env + [pair(name.id, get-type(name.ann))]
       end
     | s_let(l, name, val) =>
       if A.is-a_blank(name.ann):
-        env + [pair(name.id, tc(val, env))]
+        env + [pair(name.id, tc(val, env).type)]
       else:
         env + [pair(name.id, get-type(name.ann))]
       end
@@ -272,36 +311,33 @@ fun tc-member(ast :: A.Member, env) -> Option<Pair<String,Type>>:
   end
 end
 
-fun tc(ast :: A.Expr, env) -> Type:
-  top-type = baseType(topTag, moreRecord([]))
+fun tc(ast :: A.Expr, env) -> TCResult:
+  dynR = tcResult(dynType, [], [])
   newenv = get-bindings(ast,env)
   tc-curried = fun(expr): tc(expr, newenv) end
   cases(A.Expr) ast:
-    | s_block(l, stmts) => stmts.map(tc-curried).last()
+    | s_block(l, stmts) => stmts.foldr(fun(base, stmt): base.set-type(tc-curried(stmt)) end, dynR)
     | s_user_block(l, block) => tc-curried(block)
-    | s_var(l, name, val) => dynType
+    | s_var(l, name, val) => dynR
     | s_let(l, name, val) =>
       ty = tc-curried(val)
       bindty = get-type(name.ann)
-      if not subtype(ty, bindty):
-        raise("Type error: " + name.id + " (" + tostring(l) + ") has type " + torepr(bindty) + " and cannot be assigned a value of the wrong type: " + torepr(ty))
+      if not subtype(ty.type, bindty):
+        ty.set-type(dynType).add-error(typeError(l, name.id + " has type " + torepr(bindty) + " and cannot be assigned a value of the wrong type: " + torepr(ty)))
       else:
         ty
       end
-    | s_assign(l, id, val) => dynType
-    | s_if(l, branches) => dynType
+    | s_assign(l, id, val) => dynR
+    | s_if(l, branches) => dynR
     | s_lam(l, ps, args, ann, doc, body, ck) =>
       new-env = args.map(fun(b): pair(b.id, get-type(b.ann)) end) + env
       body-ty = tc(body, new-env)
-      if subtype(body-ty, get-type(ann)):
-        arrowType(args.map(fun(b): get-type(b.ann) end), get-type(ann), moreRecord([]))
+      if subtype(body-ty.type, get-type(ann)):
+        body-ty.set-type(arrowType(args.map(fun(b): get-type(b.ann) end), get-type(ann), moreRecord([])))
       else:
-        raise("Type error: the body of the function at " + tostring(l) +
-          " had type " + tostring(body-ty) +
-          ", which isn't a subtype of the functions return type, " +
-          tostring(ann))
+        body-ty.set-type(dynType).add-error(typeError(l, "the body of the function had type " + tostring(body-ty) + ", which isn't a subtype of the functions return type, " + tostring(ann)))
       end
-    | s_method(l, args, ann, doc, body, ck) => dynType
+    | s_method(l, args, ann, doc, body, ck) => dynR
     | s_extend(l, super, fields) =>
       base = tc-curried(super)
       for fold(ty from base, fld from fields):
@@ -310,73 +346,79 @@ fun tc(ast :: A.Expr, env) -> Type:
             # saying that if we can't figure it out, you can't use it...
           | none => ty
           | some(fldty) =>
-            type-record-add(ty, fldty.a, fldty.b)
+            ty.merge-messages(fldty.b).set-type(type-record-add(ty.type, fldty.a, fldty.b.type))
         end
       end
-    | s_update(l, super, fields) => dynType
+    | s_update(l, super, fields) => dynR
     | s_obj(l, fields) =>
-      baseType(botTag, for fold(acc from normalRecord([]), f from fields):
-          cases(option.Option) tc-member(f, newenv):
-            | none => moreRecord(acc.fields)
-              # NOTE(dbp 2013-10-16): This is a little bit of a hack -
-              # to reuse the helper that wants to operate on types.
-            | some(fty) => type-record-add(baseType(topTag,acc), fty.a, fty.b).record
-          end
-        end)
+      res = for fold(acc from pair(dynR, normalRecord([])), f from fields):
+        cases(option.Option) tc-member(f, newenv):
+          | none => pair(acc.a, moreRecord(acc.b.fields))
+            # NOTE(dbp 2013-10-16): This is a little bit of a hack -
+            # to reuse the helper that wants to operate on types.
+          | some(fty) =>
+            pair(acc.a.merge-messages(fty),
+              type-record-add(baseType(topTag,acc), fty.a, fty.b).record)
+        end
+      end
+      res.a.set-type(baseType(botTag, res.b))
     | s_app(l, fn, args) =>
       fn-ty = tc-curried(fn)
-      cases(Type) fn-ty:
+      cases(Type) fn-ty.type:
         | arrowType(arg-types, ret-type, rec-type) =>
           if args.length() <> arg-types.length():
-            raise("Type error: arity mismatch at " + tostring(l))
+            fn-ty.set-type(dynType).add-error(l, "arity mismatch: function expected " + tostring(arg-types.length()) + " arguments and was passed " + tostring(args.length()))
           else:
             arg-vals = args.map(tc-curried)
             var counter = 1
-            for map2(at from arg-types, av from arg-vals):
-              when not subtype(av, at):
-                raise("Type error: the " + tostring(counter) + " function argument is of the wrong type. Expected " + tostring(at) + ", but got " + tostring(av))
+            for fold2(ty from fn-ty.set-type(ret-type), at from arg-types, av from arg-vals):
+              if not subtype(av, at):
+                ty.add-error(l, "the " + tostring(counter) + " function argument is of the wrong type. Expected " + tostring(at) + ", but got " + tostring(av))
+              else:
+                ty
               end
             end
-            ret-type
           end
           # NOTE(dbp 2013-10-16): Not really anything we can do. Odd, but...
-        | dynType => dynType
+        | dynType => dynR
         | else =>
-          raise("Type error: applying a non-function with type " + torepr(fn-ty) + " at " + tostring(l))
+          fn-ty.add-error(l, "applying a non-function with type " + torepr(fn-ty)).set-type(dynType)
       end
     | s_id(l, id) =>
       cases(option.Option) map-get(newenv, id):
         # we won't actually get here, because we do unboundness typechecking already
-        | none => raise("Type error: " + id + " not bound (" + tostring(l) + ")")
-        | some(ty) => ty
+        | none => dynR.add-error(l, id + " not bound")
+        | some(ty) => tcResult(ty,[],[])
       end
-    | s_num(l, num) => baseType(baseTag("Number"), moreRecord([]))
-    | s_bool(l, bool) => baseType(baseTag("Bool"), moreRecord([]))
-    | s_str(l, str) => baseType(baseTag("String"), moreRecord([]))
-    | s_get_bang(l, obj, str) => dynType
+    | s_num(l, num) => tcResult(baseType(baseTag("Number"), moreRecord([])),[],[])
+    | s_bool(l, bool) => tcResult(baseType(baseTag("Bool"), moreRecord([])),[],[])
+    | s_str(l, str) => tcResult(baseType(baseTag("String"), moreRecord([])),[],[])
+    | s_get_bang(l, obj, str) => dynR
     | s_bracket(l, obj, field) =>
       cases(A.Expr) field:
         | s_str(l1, s) =>
           obj-ty = tc-curried(obj)
-          cases(Type) obj-ty:
-            | dynType => dynType
+          cases(Type) obj-ty.type:
+            | dynType => obj-ty
             | else =>
-              cases(RecordType) obj-ty.record:
+              cases(RecordType) obj-ty.type.record:
                 | normalRecord(fields) =>
                   cases(option.Option) map-get(fields, s):
-                    | none => raise("Type error: field " + s + " not found on object at " + tostring(l))
-                    | some(ty) => ty
+                    | none => obj-ty.add-error(l, "field " + s + " not found on object")
+                    | some(ty) => obj-ty.set-type(ty)
                   end
                 | moreRecord(fields) =>
                   cases(option.Option) map-get(fields, s):
-                    | none => dynType # NOTE(dbp 2013-10-16): this should be a warning probably
-                    | some(ty) => ty
+                    | none => obj-ty.add-warning(l, "field " + s + " may not exist on object.").set-type(dynType)
+                    | some(ty) => obj-ty.set-type(ty)
                   end
               end
           end
-        | else => dynType
+        | else =>
+          # NOTE(dbp 2013-10-21): Actually type check field to see if it is a String or Dyn
+          dynR.add-warning(l, "computed field access can cause runtime errors.")
       end
-    | s_colon_bracket(l, obj, field) => dynType
+    | s_colon_bracket(l, obj, field) => dynR
   end
 end
 
@@ -400,12 +442,11 @@ fun is-code-file(path):
   path^str-ends-with(".arr") and (not path^str-starts-with("."))
 end
 
-fun eval-str(p, s):
+fun tc-file(p, s):
   default-env = {list: list, error: error}
   top-type = baseType(topTag, moreRecord([]))
   type-env = [pair("Any", top-type), pair("list", baseType(botTag, moreRecord([pair("map", top-type)])))]
-  prog = s^A.parse(p, { ["check"]: false}).post-desugar^tc-prog(type-env)
-  E.eval(prog^A.to-native(), default-env, {})
+  s^A.parse(p, { ["check"]: false}).post-desugar^tc-prog(type-env)
 end
 
 
@@ -434,22 +475,18 @@ else:
   files.map(fun(path):
       when is-code-file(path):
         # NOTE(dbp 2013-09-29):
-        # We run the .arr file. It expects to have a corresponding .out and .err files.
+        # We run the .arr file. It expects to have a corresponding .err file.
         # if .err is non-empty, we expect to see an error that matches the content of that
-        # file. If it is empty, we expect the value that comes out of the .arr to match the
-        # value that comes from the .out. Obviously, the .out files should be much simpler than
-        # the .arr files.
+        # file. If it is empty, we expect it to produce nothing as the output of type checking.
         stripped = strip-ext(path)
         print("Running " + stripped)
-        outpath = stripped + ".out"
         errpath = stripped + ".err"
         code = F.input-file(path).read-file()
-        out = F.input-file(outpath).read-file()
         err = F.input-file(errpath).read-file()
         if err.length() <> 0:
-          eval-str(path, code) raises err
+          tostring(tc-file(path, code)).contains(err) is true
         else:
-          eval-str(path, code) is eval-str(outpath, out)
+          tostring(tc-file(path, code)).contains("No type errors detected.") is true
         end
       end
     end)
