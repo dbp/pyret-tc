@@ -68,11 +68,11 @@ data TCResult:
     set-type(self, ty :: Type):
       tcResult(ty, self.errors, self.warnings)
     end,
-    add-error(self, er :: TypeError):
-      tcResult(self.type, self.errors + [er], self.warnings)
+    add-error(self, l :: Loc, er :: String):
+      tcResult(self.type, self.errors + [typeError(l,er)], self.warnings)
     end,
-    add-warning(self, wn :: TypeWarning):
-      tcResult(self.type, self.errors, self.warnings + [wn])
+    add-warning(self, l :: Loc, wn :: String):
+      tcResult(self.type, self.errors, self.warnings + [typeWarning(l,wn)])
     end,
     merge-messages(self, other :: TCResult):
       tcResult(self.type, self.errors + other.errors, self.warnings + other.warnings)
@@ -83,6 +83,13 @@ sharing:
       "No type errors detected."
     else:
       "Errors:\n" + torepr(self.errors) + "\n\nWarnings:\n " + torepr(self.warnings)
+    end
+  end,
+  format-errors(self):
+    if (self.errors.length() == 0):
+      "No type errors detected."
+    else:
+      "Errors:\n" + torepr(self.errors)
     end
   end
 end
@@ -316,14 +323,17 @@ fun tc(ast :: A.Expr, env) -> TCResult:
   newenv = get-bindings(ast,env)
   tc-curried = fun(expr): tc(expr, newenv) end
   cases(A.Expr) ast:
-    | s_block(l, stmts) => stmts.foldr(fun(base, stmt): base.set-type(tc-curried(stmt)) end, dynR)
+    | s_block(l, stmts) => stmts.foldr(fun(stmt, base):
+        t = tc-curried(stmt)
+        base.merge-messages(t).set-type(t.type)
+        end, dynR)
     | s_user_block(l, block) => tc-curried(block)
     | s_var(l, name, val) => dynR
     | s_let(l, name, val) =>
       ty = tc-curried(val)
       bindty = get-type(name.ann)
       if not subtype(ty.type, bindty):
-        ty.set-type(dynType).add-error(typeError(l, name.id + " has type " + torepr(bindty) + " and cannot be assigned a value of the wrong type: " + torepr(ty)))
+        ty.set-type(dynType).add-error(l, name.id + " has type " + torepr(bindty) + " and cannot be assigned a value of the wrong type: " + torepr(ty))
       else:
         ty
       end
@@ -335,7 +345,7 @@ fun tc(ast :: A.Expr, env) -> TCResult:
       if subtype(body-ty.type, get-type(ann)):
         body-ty.set-type(arrowType(args.map(fun(b): get-type(b.ann) end), get-type(ann), moreRecord([])))
       else:
-        body-ty.set-type(dynType).add-error(typeError(l, "the body of the function had type " + tostring(body-ty) + ", which isn't a subtype of the functions return type, " + tostring(ann)))
+        body-ty.set-type(dynType).add-error(l, "the body of the function had type " + tostring(body-ty) + ", which isn't a subtype of the functions return type, " + tostring(ann))
       end
     | s_method(l, args, ann, doc, body, ck) => dynR
     | s_extend(l, super, fields) =>
@@ -357,8 +367,8 @@ fun tc(ast :: A.Expr, env) -> TCResult:
             # NOTE(dbp 2013-10-16): This is a little bit of a hack -
             # to reuse the helper that wants to operate on types.
           | some(fty) =>
-            pair(acc.a.merge-messages(fty),
-              type-record-add(baseType(topTag,acc), fty.a, fty.b).record)
+            pair(acc.a.merge-messages(fty.b),
+              type-record-add(baseType(topTag,acc.b), fty.a, fty.b.type).record)
         end
       end
       res.a.set-type(baseType(botTag, res.b))
@@ -370,10 +380,13 @@ fun tc(ast :: A.Expr, env) -> TCResult:
             fn-ty.set-type(dynType).add-error(l, "arity mismatch: function expected " + tostring(arg-types.length()) + " arguments and was passed " + tostring(args.length()))
           else:
             arg-vals = args.map(tc-curried)
+            # NOTE(dbp 2013-10-21): collect messages from type checking
+            base-type = arg-vals.foldr(fun(arg, base): base.merge-messages(arg) end,
+              fn-ty.set-type(ret-type))
             var counter = 1
-            for fold2(ty from fn-ty.set-type(ret-type), at from arg-types, av from arg-vals):
-              if not subtype(av, at):
-                ty.add-error(l, "the " + tostring(counter) + " function argument is of the wrong type. Expected " + tostring(at) + ", but got " + tostring(av))
+            for fold2(ty from base-type, at from arg-types, av from arg-vals):
+              if not subtype(av.type, at):
+                ty.add-error(l, "the " + tostring(counter) + " function argument is of the wrong type. Expected " + torepr(at) + ", but got " + torepr(av))
               else:
                 ty
               end
@@ -484,9 +497,11 @@ else:
         code = F.input-file(path).read-file()
         err = F.input-file(errpath).read-file()
         if err.length() <> 0:
-          tostring(tc-file(path, code)).contains(err) is true
+          msg = tc-file(path, code).format-errors()
+          pair(path,pair(msg, msg.contains(err))) is pair(path, pair(msg, true))
         else:
-          tostring(tc-file(path, code)).contains("No type errors detected.") is true
+          msg = tc-file(path, code).format-errors()
+          pair(path, pair(msg, msg.contains("No type errors detected."))) is pair(path,pair(msg, true))
         end
       end
     end)
