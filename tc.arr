@@ -150,7 +150,7 @@ fun augment(ast-expr :: A.Expr) -> A.Expr:
   augment-local(ast-expr)
 end
 
-fun tc-prog(prog :: A.Program, env):
+fun tc-prog(prog :: A.Program, iifs, env):
   tc(augment(prog.block), env)
 end
 
@@ -212,6 +212,65 @@ where:
   gb-src("x = 2") is [pair("x", name-ty("Number"))]
   gb-src("x = 2 y = x") is [pair("x", name-ty("Number")),
                             pair("y", name-ty("Number"))]
+end
+
+fun is-inferred-functions(ast :: A.Expr, env) -> List<Pair<String, Type>>:
+  iif-curried = is-inferred-functions(_, env)
+  fun find-is-pairs(name :: String, e :: A.Expr) -> List<Type>: # arrowType specifically
+    cases(A.Expr) e:
+      | s_block(l, stmts) => stmts.map(find-is-pairs(name, _))^concat()
+      | s_op(l, op, left, right) =>
+        if op == "opis":
+          # NOTE(dbp 2013-10-21): Really simple for now - only if it is of form funname(args) is bar
+          cases(A.Expr) left:
+            | s_app(l1, fn, args) =>
+              cases(A.Expr) fn:
+                | s_id(l2, fname) =>
+                  if fname == name:
+                    [arrowType(args.map(fun(arg): tc(arg,env).type end),
+                        tc(right, env).type, moreRecord([]))]
+                  else:
+                    []
+                  end
+                | else => []
+              end
+            | else => []
+          end
+        else:
+          []
+        end
+      | else => []
+    end
+  end
+  cases(A.Expr) ast:
+    | s_block(l, stmts) => stmts.map(iif-curried)^concat()
+    | s_fun(l, name, params, args, ann, doc, body, ck) =>
+      pairs = find-is-pairs(name, ck)
+      # NOTE(dbp 2013-10-21): this should do an least upper bound, eventually.
+      if pairs <> []:
+        [pair(name, pairs.first)]
+      else:
+        []
+      end
+    | else => []
+  end
+where:
+  fun iif-src(src):
+    is-inferred-functions(A.parse(src,"anonymous-file", { ["check"]: false}).pre-desugar.block, [])
+  end
+  baseRec = moreRecord([])
+  numty = baseType(baseTag("Number"), baseRec)
+  strty = baseType(baseTag("String"), baseRec)
+  boolty = baseType(baseTag("Bool"), baseRec)
+  iif-src("fun f(): 10 where: f() is 10 end") is [pair("f", arrowType([], numty, baseRec))]
+  iif-src("fun f(x): 10 where: f('foo') is true end") is
+    [pair("f", arrowType([strty], boolty, baseRec))]
+  iif-src("fun f(x): 10 where: f('foo') is true end
+    fun g(): 10 where: g() is 10 end") is
+  [pair("f", arrowType([strty], boolty, baseRec)), pair("g", arrowType([], numty, baseRec))]
+  iif-src("fun f(x): 10 where: f('foo') is true end
+    fun g(): 10 where: f() is 10 end") is
+  [pair("f", arrowType([strty], boolty, baseRec))]
 end
 
 fun subtype(child :: Type, parent :: Type) -> Bool:
@@ -465,7 +524,9 @@ fun tc-file(p, s):
   top-type = baseType(topTag, moreRecord([]))
   type-env = [pair("Any", top-type), pair("list", baseType(botTag,
         moreRecord([pair("map", top-type)])))]
-  s^A.parse(p, { ["check"]: false}).post-desugar^tc-prog(type-env)
+  stx = s^A.parse(p, { ["check"]: false})
+  iifs = is-inferred-functions(stx.pre-desugar.block, type-env)
+  tc-prog(stx.post-desugar, iifs, type-env)
 end
 
 
