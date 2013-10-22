@@ -333,7 +333,8 @@ fun tc(ast :: A.Expr, env) -> TCResult:
       ty = tc-curried(val)
       bindty = get-type(name.ann)
       if not subtype(ty.type, bindty):
-        ty.set-type(dynType).add-error(l, name.id + " has type " + torepr(bindty) + " and cannot be assigned a value of the wrong type: " + torepr(ty))
+        ty.set-type(dynType).add-error(l, name.id + " has type " + torepr(bindty) +
+          " and cannot be assigned a value of the wrong type: " + torepr(ty))
       else:
         ty
       end
@@ -377,7 +378,8 @@ fun tc(ast :: A.Expr, env) -> TCResult:
       cases(Type) fn-ty.type:
         | arrowType(arg-types, ret-type, rec-type) =>
           if args.length() <> arg-types.length():
-            fn-ty.set-type(dynType).add-error(l, "arity mismatch: function expected " + tostring(arg-types.length()) + " arguments and was passed " + tostring(args.length()))
+            fn-ty.set-type(dynType).add-error(l, "arity mismatch: function expected " +
+              tostring(arg-types.length()) + " arguments and was passed " + tostring(args.length()))
           else:
             arg-vals = args.map(tc-curried)
             # NOTE(dbp 2013-10-21): collect messages from type checking
@@ -386,7 +388,9 @@ fun tc(ast :: A.Expr, env) -> TCResult:
             var counter = 1
             for fold2(ty from base-type, at from arg-types, av from arg-vals):
               if not subtype(av.type, at):
-                ty.add-error(l, "the " + tostring(counter) + " function argument is of the wrong type. Expected " + torepr(at) + ", but got " + torepr(av))
+                ty.add-error(l, "the " + tostring(counter) +
+                  " function argument is of the wrong type. Expected " +
+                  torepr(at) + ", but got " + torepr(av))
               else:
                 ty
               end
@@ -422,7 +426,8 @@ fun tc(ast :: A.Expr, env) -> TCResult:
                   end
                 | moreRecord(fields) =>
                   cases(option.Option) map-get(fields, s):
-                    | none => obj-ty.add-warning(l, "field " + s + " may not exist on object.").set-type(dynType)
+                    | none => obj-ty.add-warning(l, "field " + s +
+                        " may not exist on object.").set-type(dynType)
                     | some(ty) => obj-ty.set-type(ty)
                   end
               end
@@ -458,7 +463,8 @@ end
 fun tc-file(p, s):
   default-env = {list: list, error: error}
   top-type = baseType(topTag, moreRecord([]))
-  type-env = [pair("Any", top-type), pair("list", baseType(botTag, moreRecord([pair("map", top-type)])))]
+  type-env = [pair("Any", top-type), pair("list", baseType(botTag,
+        moreRecord([pair("map", top-type)])))]
   s^A.parse(p, { ["check"]: false}).post-desugar^tc-prog(type-env)
 end
 
