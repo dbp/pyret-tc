@@ -6,6 +6,7 @@ import directory as D
 import file as F
 import Racket as Racket
 Loc = error.Location
+loc = error.location
 
 data Result:
   | result(ast :: A.Program, query :: (NodeId -> Type),
@@ -62,20 +63,21 @@ data RecordType:
   | moreRecord(fields :: Map<String,Type>)
 end
 
-# NOTE(dbp 2013-10-17): Report data structure, the return type of tc
+# NOTE(dbp 2013-10-30): We include the env because we might want to inspect it. It is not
+# there for dynamic scoping purposes.
 data TCResult:
-  | tcResult(type :: Type, errors :: List<TypeError>, warnings :: List<TypeWarning>) with:
+  | tcResult(type :: Type, errors :: List<TypeError>, warnings :: List<TypeWarning>, env) with:
     set-type(self, ty :: Type):
-      tcResult(ty, self.errors, self.warnings)
+      tcResult(ty, self.errors, self.warnings, self.env)
     end,
     add-error(self, l :: Loc, er :: String):
-      tcResult(self.type, self.errors + [typeError(l,er)], self.warnings)
+      tcResult(self.type, self.errors + [typeError(l,er)], self.warnings, self.env)
     end,
     add-warning(self, l :: Loc, wn :: String):
-      tcResult(self.type, self.errors, self.warnings + [typeWarning(l,wn)])
+      tcResult(self.type, self.errors, self.warnings + [typeWarning(l,wn)], self.env)
     end,
     merge-messages(self, other :: TCResult):
-      tcResult(self.type, self.errors + other.errors, self.warnings + other.warnings)
+      tcResult(self.type, self.errors + other.errors, self.warnings + other.warnings, self.env)
     end
 sharing:
   tostring(self):
@@ -167,25 +169,30 @@ end
 
 fun get-bindings(ast :: A.Expr, env) -> List<Pair<String, Type>>:
   doc: "This function implements letrec behavior"
+  anyty = baseType(topTag, moreRecord([]))
+  boolty = baseType(baseTag("Bool"), moreRecord([]))
   cases(A.Expr) ast:
     | s_block(l, stmts) => stmts.foldl(fun(stmt, newenv): get-bindings(stmt, newenv) end, env)
     | s_user_block(l, block) => get-bindings(block, env)
       # NOTE(dbp 2013-10-16): I'm using the ann if it exists, otherwise the value.
     | s_var(l, name, val) =>
       if A.is-a_blank(name.ann):
-        env + [pair(name.id, tc(val, env).type)]
+        env + [pair(name.id, tc(val, [], env).type)]
       else:
         env + [pair(name.id, get-type(name.ann))]
       end
     | s_let(l, name, val) =>
       if A.is-a_blank(name.ann):
-        env + [pair(name.id, tc(val, env).type)]
+        env + [pair(name.id, tc(val, [], env).type)]
       else:
         env + [pair(name.id, get-type(name.ann))]
       end
     | s_if(l, branches) =>
       # NOTE(dbp 2013-10-16): Adds a bunch of copies of env... woops
       branches.map(get-bindings(_,env))^concat()
+    | s_datatype(l, name, params, variants, _) =>
+      variants.map(get-variant-bindings(name, _))^concat() +
+      [pair(name, arrowType([anyty], boolty, moreRecord([])))] + env
     | else => env
     # | s_assign(l, id, val) => []
     # | s_lam(l, ps, args, ann, doc, body, ck) => []
@@ -212,6 +219,63 @@ where:
   gb-src("x = 2") is [pair("x", name-ty("Number"))]
   gb-src("x = 2 y = x") is [pair("x", name-ty("Number")),
                             pair("y", name-ty("Number"))]
+end
+
+fun get-variant-bindings(tname :: String, variant :: A.Variant(fun(v):
+                                     A.is-s_datatype_variant(v) or
+                                     A.is-s_datatype_singleton_variant(v) end)) ->
+    List<Pair<String, Type>>:
+  bigty = baseType(baseTag(tname), moreRecord([]))
+  boolty = baseType(baseTag("Bool"), moreRecord([]))
+  anyty = baseType(topTag, moreRecord([]))
+  fun get-member-type(m): get-type(m.bind.ann) end
+  cases(A.Variant) variant:
+      # NOTE(dbp 2013-10-30): Should type check constructor here, get methods/fields.
+    | s_datatype_variant(l, vname, members, constr) =>
+      [pair(vname, arrowType(members.map(get-member-type), bigty, moreRecord([]))),
+        pair("is-" + vname, arrowType([anyty], boolty, moreRecord([])))]
+    | s_datatype_singleton_variant(l, vname, constr) =>
+      [pair(vname, bigty),
+        pair("is-" + vname, arrowType([anyty], boolty, moreRecord([])))]
+  end
+where:
+  # NOTE(dbp 2013-10-30): I don't like writing tests with the ast written out
+  # like this, as it seems fragile, but I don't think we have a way of parsing
+  # fragments, and parsing larger programs and extracting the parts out doesn't
+  # seem any less fragile
+  dummy-loc = loc("dummy-file", -1, -1)
+  footy = baseType(baseTag("Foo"), moreRecord([]))
+  anyty = baseType(topTag, moreRecord([]))
+  boolty = baseType(baseTag("Bool"), moreRecord([]))
+  strty = baseType(baseTag("String"), moreRecord([]))
+  get-variant-bindings("Foo",
+    A.s_datatype_variant(dummy-loc, "foo",
+    [],
+    A.s_datatype_constructor(dummy-loc, "self", A.s_id(dummy-loc, "self"))))
+  is
+  [pair("foo", arrowType([], footy, moreRecord([]))),
+  pair("is-foo", arrowType([anyty], boolty, moreRecord([])))]
+
+  get-variant-bindings("Foo",
+    A.s_datatype_variant(dummy-loc, "foo",
+    [A.s_variant_member(dummy-loc, "normal", A.s_bind(dummy-loc, "a", A.a_name(dummy-loc, "String")))],
+      A.s_datatype_constructor(dummy-loc, "self", A.s_id(dummy-loc, "self"))))
+  is
+  [pair("foo", arrowType([strty], footy, moreRecord([]))),
+  pair("is-foo", arrowType([anyty], boolty, moreRecord([])))]
+
+
+  get-variant-bindings("Foo",
+    A.s_datatype_variant(dummy-loc, "foo",
+    [A.s_variant_member(dummy-loc, "normal",
+        A.s_bind(dummy-loc, "a", A.a_name(dummy-loc, "String"))),
+    A.s_variant_member(dummy-loc, "normal",
+        A.s_bind(dummy-loc, "b", A.a_name(dummy-loc, "Bool")))],
+    A.s_datatype_constructor(dummy-loc, "self", A.s_id(dummy-loc, "self"))))
+  is
+  [pair("foo", arrowType([strty, boolty], footy, moreRecord([]))),
+  pair("is-foo", arrowType([anyty], boolty, moreRecord([])))]
+
 end
 
 fun is-inferred-functions(ast :: A.Expr, env) -> List<Pair<String, Type>>:
@@ -380,8 +444,9 @@ fun tc-member(ast :: A.Member, iifs, env) -> Option<Pair<String,Type>>:
 end
 
 fun tc(ast :: A.Expr, iifs, env) -> TCResult:
-  dynR = tcResult(dynType, [], [])
   newenv = get-bindings(ast,env)
+  dynR = tcResult(dynType, [], [], newenv)
+  nothingR = tcResult(baseType(baseTag("Nothing"), normalRecord([])), [], [], newenv)
   tc-curried = fun(expr): tc(expr, iifs, newenv) end
   cases(A.Expr) ast:
     | s_block(l, stmts) => stmts.foldr(fun(stmt, base):
@@ -509,11 +574,11 @@ fun tc(ast :: A.Expr, iifs, env) -> TCResult:
       cases(option.Option) map-get(newenv, id):
         # we won't actually get here, because we do unboundness typechecking already
         | none => dynR.add-error(l, id + " not bound")
-        | some(ty) => tcResult(ty,[],[])
+        | some(ty) => tcResult(ty,[],[],newenv)
       end
-    | s_num(l, num) => tcResult(baseType(baseTag("Number"), moreRecord([])),[],[])
-    | s_bool(l, bool) => tcResult(baseType(baseTag("Bool"), moreRecord([])),[],[])
-    | s_str(l, str) => tcResult(baseType(baseTag("String"), moreRecord([])),[],[])
+    | s_num(l, num) => tcResult(baseType(baseTag("Number"), moreRecord([])),[],[],newenv)
+    | s_bool(l, bool) => tcResult(baseType(baseTag("Bool"), moreRecord([])),[],[],newenv)
+    | s_str(l, str) => tcResult(baseType(baseTag("String"), moreRecord([])),[],[],newenv)
     | s_get_bang(l, obj, str) => dynR
     | s_bracket(l, obj, field) =>
       cases(A.Expr) field:
@@ -541,6 +606,11 @@ fun tc(ast :: A.Expr, iifs, env) -> TCResult:
           dynR.add-warning(l, "computed field access can cause runtime errors.")
       end
     | s_colon_bracket(l, obj, field) => dynR
+    | s_datatype(l, name, params, variants, check) =>
+      # NOTE(dbp 2013-10-30): Should statements have type nothing?
+      nothingR
+    | s_cases(l, type, val, branches) => dynR #TODOTODOTODO
+    | else => raise("tc: no case matched for: " + torepr(ast))
   end
 end
 
@@ -565,13 +635,19 @@ fun is-code-file(path):
 end
 
 fun tc-file(p, s):
-  default-env = {list: list, error: error}
   top-type = baseType(topTag, moreRecord([]))
-  type-env = [pair("Any", top-type), pair("list", baseType(botTag,
-        moreRecord([pair("map", top-type)])))]
+  type-env = [
+    pair("Any", top-type),
+    pair("list", baseType(botTag,
+        moreRecord([pair("map", top-type)]))),
+     pair("builtins", baseType(botTag,
+        moreRecord([])))
+  ]
   stx = s^A.parse(p, { ["check"]: false})
   iifs = is-inferred-functions(stx.pre-desugar.block, type-env)
-  tc-prog(stx.post-desugar, iifs, type-env)
+  resultty = tc-prog(stx.with-types, iifs, type-env)
+  # print(resultty.env.map(torepr).join-str("\n"))
+  resultty
 end
 
 

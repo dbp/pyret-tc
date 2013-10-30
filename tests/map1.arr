@@ -1,3 +1,5 @@
+#lang pyret
+
 A = Any
 B = Any
 List = list.List
