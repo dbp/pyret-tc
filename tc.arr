@@ -23,6 +23,10 @@ end
 
 data Pair:
   | pair(a,b)
+sharing:
+  _equals(self, other):
+    (self.a == other.a) and (self.b == other.b)
+  end
 end
 NodeId = is-number
 fun <K,V> Map(o): List(o) end
@@ -47,13 +51,30 @@ data Type:
   | dynType
   | baseType(tags :: TagType, record :: RecordType)
   | arrowType(args :: List<Type>, ret :: Type, record :: RecordType)
+sharing:
+  _equals(self, other):
+    cases(Type) self:
+      | dynType => is-dynType(other)
+      | baseType(tags, record) =>
+        is-baseType(other) and (tags == other.tags) and (record == other.record)
+      | arrowType(args, ret, record) =>
+        is-arrowType(other) and (args == other.args) and (ret == other.ret) and (record == other.record)
+    end
+  end
 end
 
 data TagType:
   | topTag
   | botTag
   | baseTag(name :: String)
-  | unionTag(ts :: List<Tag>)
+sharing:
+  _equals(self, other):
+    cases(TagType) self:
+      | topTag => is-topTag(other)
+      | botTag => is-botTag(other)
+      | baseTag(name) => is-baseTag(other) and (name == other.name)
+    end
+  end
 end
 
 data RecordType:
@@ -61,6 +82,13 @@ data RecordType:
     # NOTE(dbp 2013-10-16): For when we know there are more fields, but aren't sure what they are.
     # this happens because of computed field names.
   | moreRecord(fields :: Map<String,Type>)
+sharing:
+  _equals(self, other):
+    cases(RecordType) self:
+      | normalRecord(fields) => is-normalRecord(other) and (fields == other.fields)
+      | moreRecord(fields) => is-moreRecord(other) and (fields == other.fields)
+    end
+  end
 end
 
 # NOTE(dbp 2013-10-30): We include the env because we might want to inspect it. It is not
@@ -609,7 +637,74 @@ fun tc(ast :: A.Expr, iifs, env) -> TCResult:
     | s_datatype(l, name, params, variants, check) =>
       # NOTE(dbp 2013-10-30): Should statements have type nothing?
       nothingR
-    | s_cases(l, type, val, branches) => dynR #TODOTODOTODO
+    | s_cases(l, _type, val, branches) =>
+      type = get-type(_type)
+      val-ty = tc-curried(val)
+      if not subtype(type, val-ty.type):
+        dynR.add-error(l, "value in cases expression is not of the right type. Expected " + torepr(type) + " but got " + torepr(val-ty.type))
+      else:
+        branches.foldr(fun(branch, ty-ers):
+            # TODO(dbp 2013-10-30): Need to have a data-env, so we can pick up non-bound constructors.
+            cases(option.Option) map-get(newenv, branch.name):
+              | none => ty-ers.add-error(branch.l,
+                  "A branch of cases statement is not a valid variant of the type " +
+                  torepr(type) + ": " + branch.name)
+              | some(ty) =>
+                cases(Type) ty:
+                  | arrowType(args, ret, rec) =>
+                    # NOTE(dbp 2013-10-30): No subtyping - cases type must match constructors exactly.
+                    if ret <> type:
+                      ty-ers.add-error(branch.l,
+                        "A branch of cases statement is not a valid variant of the type " +
+                        torepr(type) + ": " + branch.name)
+                    else if args.length() <> branch.args.length():
+                      ty-ers.add-error(branch.l,
+                        "The variant pattern for branch " + branch.name +
+                        " does not have the right number of fields. Expected " +
+                        torepr(args.length()) + " but got " + torepr(branch.args.length()))
+                    else:
+                      # NOTE(dbp 2013-10-30): We want to check that branches have the same type.
+                      # This is slightly tricky, so we'll opt for a dynless solution - set it to
+                      # the first branches type, and make sure all the rest are equal.
+                      branchenv = newenv + for map2(bind from branch.args, argty from args): pair(bind.id, argty) end
+                      branchty = tc(branch.body, iifs, branchenv)
+                      if ty-ers.type == dynType: # in first branch
+                        branchty.merge-messages(ty-ers) # set branchty's type
+                      else:
+                        if branchty.type == ty-ers.type:
+                          ty-ers.merge-messages(branchty)
+                        else:
+                          ty-ers.merge-messages(branchty).add-error(branch.l,
+                            "All branches of a cases expression must have the same type. Found a branch with a different type.")
+                        end
+                      end
+                    end
+                  | baseType(_,_) =>
+                    if not (ty == type):
+                      ty-ers.add-error(branch.l,
+                        "A branch of cases statement is not a valid variant of the type " +
+                        torepr(type) + ": " + branch.name)
+                    else:
+                      branchty = tc-curried(branch.body)
+                      if ty-ers.type == dynType: # in first branch
+                        branchty.merge-messages(ty-ers) # set branchty's type
+                      else:
+                        if branchty.type == ty-ers.type:
+                          ty-ers.merge-messages(branchty)
+                        else:
+                          ty-ers.merge-messages(branchty).add-error(branch.l,
+                            "All branches of a cases expression must have the same type. Found a branch with a different type.")
+                        end
+                      end
+                    end
+                  | else =>
+                    ty-ers.add-error(branch.l,
+                      "A branch of cases statement is not a valid variant of the type " +
+                      torepr(type) + ": " + branch.name)
+                end
+            end
+          end, dynR)
+      end
     | else => raise("tc: no case matched for: " + torepr(ast))
   end
 end
@@ -636,12 +731,16 @@ end
 
 fun tc-file(p, s):
   top-type = baseType(topTag, moreRecord([]))
+  listty = baseType(baseTag("List"), moreRecord([]))
   type-env = [
     pair("Any", top-type),
     pair("list", baseType(botTag,
         moreRecord([pair("map", top-type)]))),
-     pair("builtins", baseType(botTag,
-        moreRecord([])))
+    pair("builtins", baseType(botTag,
+        moreRecord([]))),
+    pair("link", arrowType([dynType, dynType], listty, moreRecord([]))),
+    pair("empty", listty)
+
   ]
   stx = s^A.parse(p, { ["check"]: false})
   iifs = is-inferred-functions(stx.pre-desugar.block, type-env)

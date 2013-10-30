@@ -2,9 +2,6 @@
 
 A = Any
 B = Any
-List = list.List
-empty = list.empty
-link = list.link
 
 fun my-map(fn :: (A -> B), l :: List<A>) -> List<B>:
   cases(List) l:
