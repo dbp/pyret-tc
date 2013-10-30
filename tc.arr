@@ -151,7 +151,7 @@ fun augment(ast-expr :: A.Expr) -> A.Expr:
 end
 
 fun tc-prog(prog :: A.Program, iifs, env):
-  tc(augment(prog.block), env)
+  tc(augment(prog.block), iifs, env)
 end
 
 fun get-type(ann :: A.Ann) -> Type:
@@ -219,7 +219,7 @@ fun is-inferred-functions(ast :: A.Expr, env) -> List<Pair<String, Type>>:
   fun find-is-pairs(name :: String, e :: A.Expr) -> List<Type>: # arrowType specifically
     cases(A.Expr) e:
       | s_block(l, stmts) => stmts.map(find-is-pairs(name, _))^concat()
-      | s_op(l, op, left, right) =>
+      | s_check_test(l, op, left, right) =>
         if op == "opis":
           # NOTE(dbp 2013-10-21): Really simple for now - only if it is of form funname(args) is bar
           cases(A.Expr) left:
@@ -227,8 +227,9 @@ fun is-inferred-functions(ast :: A.Expr, env) -> List<Pair<String, Type>>:
               cases(A.Expr) fn:
                 | s_id(l2, fname) =>
                   if fname == name:
-                    [arrowType(args.map(fun(arg): tc(arg,env).type end),
-                        tc(right, env).type, moreRecord([]))]
+                    # NOTE(dbp 2013-10-21): Not sending inferred fns in - is that okay?
+                    [arrowType(args.map(fun(arg): tc(arg,[],env).type end),
+                        tc(right, [], env).type, moreRecord([]))]
                   else:
                     []
                   end
@@ -256,7 +257,8 @@ fun is-inferred-functions(ast :: A.Expr, env) -> List<Pair<String, Type>>:
   end
 where:
   fun iif-src(src):
-    is-inferred-functions(A.parse(src,"anonymous-file", { ["check"]: false}).pre-desugar.block, [])
+    stx = A.parse(src,"anonymous-file", { ["check"]: false}).pre-desugar
+    is-inferred-functions(stx.block, [])
   end
   baseRec = moreRecord([])
   numty = baseType(baseTag("Number"), baseRec)
@@ -361,13 +363,13 @@ where:
   type-record-add(my-more-type, "foo", my-type) is baseType(topTag, moreRecord([pair("foo", my-type)]))
 end
 
-fun tc-member(ast :: A.Member, env) -> Option<Pair<String,Type>>:
+fun tc-member(ast :: A.Member, iifs, env) -> Option<Pair<String,Type>>:
   cases(A.Member) ast:
     | s_data_field(l, name, value) =>
       # NOTE(dbp 2013-10-14): This is a bummer, but if it isn't
       # immediately obviously a string, not sure what to do.
       cases(A.Expr) name:
-        | s_str(l1, s) => some(pair(s, tc(value, env)))
+        | s_str(l1, s) => some(pair(s, tc(value, iifs, env)))
         | else => none
       end
     | else => none
@@ -377,10 +379,10 @@ fun tc-member(ast :: A.Member, env) -> Option<Pair<String,Type>>:
   end
 end
 
-fun tc(ast :: A.Expr, env) -> TCResult:
+fun tc(ast :: A.Expr, iifs, env) -> TCResult:
   dynR = tcResult(dynType, [], [])
   newenv = get-bindings(ast,env)
-  tc-curried = fun(expr): tc(expr, newenv) end
+  tc-curried = fun(expr): tc(expr, iifs, newenv) end
   cases(A.Expr) ast:
     | s_block(l, stmts) => stmts.foldr(fun(stmt, base):
         t = tc-curried(stmt)
@@ -389,19 +391,62 @@ fun tc(ast :: A.Expr, env) -> TCResult:
     | s_user_block(l, block) => tc-curried(block)
     | s_var(l, name, val) => dynR
     | s_let(l, name, val) =>
-      ty = tc-curried(val)
+      # NOTE(dbp 2013-10-21): Ugly hack. We want to find
+      # desugared funs, so we look for let bindings. Our no-shadowing
+      # rule actually makes this easier, because since the iifs are
+      # all top level, if we find a binding anywhere that has that
+      # name, it must be the function.
       bindty = get-type(name.ann)
-      if not subtype(ty.type, bindty):
-        ty.set-type(dynType).add-error(l, name.id + " has type " + torepr(bindty) +
-          " and cannot be assigned a value of the wrong type: " + torepr(ty))
-      else:
-        ty
+      cases(option.Option) map-get(iifs, name.id):
+        | none =>
+          ty = tc-curried(val)
+          if not subtype(ty.type, bindty):
+            ty.set-type(dynType).add-error(l, name.id + " has type " + torepr(bindty) +
+              " and cannot be assigned a value of the wrong type: " + torepr(ty))
+          else:
+            ty
+          end
+        | some(fty) =>
+          # NOTE(dbp 2013-10-21): we want to type check the function
+          # bound with our inferred type, unless they provided their
+          # own type. In the case of a type error when inference was involved
+          # we want to alter the error messages.
+          cases(A.Expr) val:
+            | s_lam(l1, ps, args, ann, doc, body, ck) =>
+              # NOTE(dbp 2013-10-21): Gah, mutation. This code should be refactored.
+              var inferred = false
+              arg-tys = for map2(b from args, inf from fty.args):
+                if A.is-a_blank(b.ann):
+                  when inf <> dynType:
+                    inferred := true
+                  end
+                  inf
+                else:
+                  get-type(b.ann)
+                end
+              end
+              newenv1 = for map2(b from args, t from arg-tys):
+                pair(b.id, t)
+              end + newenv
+              body-ty = tc(body, iifs, newenv1)
+              ret-ty = if A.is-a_blank(ann): fty.ret else: get-type(ann) end
+              if subtype(body-ty.type, ret-ty):
+                body-ty.set-type(arrowType(arg-tys, ret-ty, moreRecord([])))
+              else:
+                body-ty.set-type(dynType).add-error(l, "the body of the function " + (if inferred: "was inferred based on tests with " else: "had " end) + "type " + tostring(body-ty) + ", which isn't a subtype of the functions return type, " + tostring(ann))
+              end
+            | else =>
+              # NOTE(dbp 2013-10-21): This is a bizarre case. It means we no longer
+              # understand the desugaring, so we really should abort and figure our stuff out.
+              raise("Type Checker error: encountered a let binding that
+                should have been a function, but wasn't (at loc " + torepr(l) + ")")
+          end
       end
     | s_assign(l, id, val) => dynR
     | s_if(l, branches) => dynR
     | s_lam(l, ps, args, ann, doc, body, ck) =>
-      new-env = args.map(fun(b): pair(b.id, get-type(b.ann)) end) + env
-      body-ty = tc(body, new-env)
+      newenv1 = args.map(fun(b): pair(b.id, get-type(b.ann)) end) + newenv
+      body-ty = tc(body, iifs, newenv1)
       if subtype(body-ty.type, get-type(ann)):
         body-ty.set-type(arrowType(args.map(fun(b): get-type(b.ann) end), get-type(ann), moreRecord([])))
       else:
@@ -411,7 +456,7 @@ fun tc(ast :: A.Expr, env) -> TCResult:
     | s_extend(l, super, fields) =>
       base = tc-curried(super)
       for fold(ty from base, fld from fields):
-        cases(option.Option) tc-member(fld, newenv):
+        cases(option.Option) tc-member(fld, iifs, newenv):
             # NOTE(dbp 2013-10-14): this seems really bad... as we're
             # saying that if we can't figure it out, you can't use it...
           | none => ty
@@ -422,7 +467,7 @@ fun tc(ast :: A.Expr, env) -> TCResult:
     | s_update(l, super, fields) => dynR
     | s_obj(l, fields) =>
       res = for fold(acc from pair(dynR, normalRecord([])), f from fields):
-        cases(option.Option) tc-member(f, newenv):
+        cases(option.Option) tc-member(f, iifs, newenv):
           | none => pair(acc.a, moreRecord(acc.b.fields))
             # NOTE(dbp 2013-10-16): This is a little bit of a hack -
             # to reuse the helper that wants to operate on types.
@@ -447,9 +492,9 @@ fun tc(ast :: A.Expr, env) -> TCResult:
             var counter = 1
             for fold2(ty from base-type, at from arg-types, av from arg-vals):
               if not subtype(av.type, at):
-                ty.add-error(l, "the " + tostring(counter) +
-                  " function argument is of the wrong type. Expected " +
-                  torepr(at) + ", but got " + torepr(av))
+                ty.add-error(l, "argument number " + tostring(counter) +
+                  " passed to the function is of the wrong type. Expected " +
+                  torepr(at) + ", but got " + torepr(av.type))
               else:
                 ty
               end
