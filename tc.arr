@@ -539,7 +539,7 @@ fun tc-file(p, s):
 end
 
 fun tc-prog(prog :: A.Program, iifs, env, type-env):
-  tc(prog.block, iifs, env)
+  tc(prog.block, iifs, env, type-env)
 end
 
 fun tc-member(ast :: A.Member, iifs, env, type-env) -> Option<Pair<String,Type>>:
@@ -789,7 +789,7 @@ fun tc(ast :: A.Expr, iifs, _env, _type-env) -> TCResult:
                                    argty from args):
                             pair(bind.id, argty)
                           end
-                      branchty = tc(branch.body, iifs, branchenv)
+                      branchty = tc(branch.body, iifs, branchenv, type-env)
                       if ty-ers.type == dynType: # in first branch
                         branchty.merge-messages(ty-ers) # set branchty's type
                       else:
