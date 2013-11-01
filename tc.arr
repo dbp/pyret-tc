@@ -39,6 +39,15 @@ data Pair:
 sharing:
   _equals(self, other):
     (self.a == other.a) and (self.b == other.b)
+  end,
+  chain(self, op, other):
+    pair(op(self.a, other.a), op(self.b, other.b))
+  end,
+  chainl(self, op, arg):
+    pair(op(self.a, arg), self.b)
+  end,
+  chainr(self, op, arg):
+    pair(self.a, op(self.b, arg))
   end
 end
 
@@ -97,15 +106,15 @@ end
 # NOTE(dbp 2013-10-30): env included for debugging / tooling. It
 # should never be used for typechecking.
 data TCResult:
-  | tcResult(type :: Type, errors :: List<TypeError>, env) with:
+  | tcResult(type :: Type, errors :: List<TypeError>, env, type-env) with:
     set-type(self, ty :: Type):
-      tcResult(ty, self.errors, self.env)
+      tcResult(ty, self.errors, self.env, self.type-env)
     end,
     add-error(self, l :: Loc, er :: String):
-      tcResult(self.type, self.errors + [typeError(l,er)], self.env)
+      tcResult(self.type, self.errors + [typeError(l,er)], self.env, self.type-env)
     end,
     merge-messages(self, other :: TCResult):
-      tcResult(self.type, self.errors + other.errors, self.env)
+      tcResult(self.type, self.errors + other.errors, self.env, self.type-env)
     end
 sharing:
   format-errors(self):
@@ -165,6 +174,10 @@ data TCError:
   | errCasesBranchType with: tostring(self):
       "All branches of a cases expression must evaluate
       to the same type."
+    end
+  | errTypeNotDefined with: tostring(self):
+      "A type was used that is not defined. Did you forget to
+      import, or forget to add the type parameter?"
     end
 end
 
@@ -250,43 +263,52 @@ end
 # Binding extraction, letrec behavior, datatype bindings.                      #
 ################################################################################
 
-fun get-bindings(ast :: A.Expr, env) -> List<Pair<String, Type>>:
+fun get-bindings(ast :: A.Expr, envs) -> Pair<List<Pair<String, Type>>,List<String>>:
   doc: "This function implements letrec behavior."
   anyty = baseType(topTag, moreRecord([]))
   cases(A.Expr) ast:
-    | s_block(l, stmts) => stmts.foldl(fun(stmt, newenv): get-bindings(stmt, newenv) end, env)
-    | s_user_block(l, block) => get-bindings(block, env)
+    | s_block(l, stmts) =>
+      stmts.foldl(fun(stmt, newenvs):
+          get-bindings(stmt, newenvs)
+        end, envs)
+    | s_user_block(l, block) => get-bindings(block, envs)
       # NOTE(dbp 2013-10-16): Use the ann if it exists, otherwise the type of value.
     | s_var(l, name, val) =>
       if A.is-a_blank(name.ann):
-        env + [pair(name.id, tc(val, [], env).type)]
+        envs.chainl((_+_), [pair(name.id, tc(val, [], envs.a, envs.b).type)])
       else:
-        env + [pair(name.id, get-type(name.ann))]
+        envs.chainl((_+_), [pair(name.id, get-type(name.ann))])
       end
     | s_let(l, name, val) =>
       if A.is-a_blank(name.ann):
-        env + [pair(name.id, tc(val, [], env).type)]
+        envs.chainl((_+_), [pair(name.id, tc(val, [], envs.a, envs.b).type)])
       else:
-        env + [pair(name.id, get-type(name.ann))]
+        envs.chainl((_+_), [pair(name.id, get-type(name.ann))])
       end
-    | s_if(l, branches) =>
-      # NOTE(dbp 2013-10-16): Adds a bunch of copies of env... woops
-      branches.map(get-bindings(_,env))^concat()
+      # NOTE(dbp 2013-11-01): Not including, as bindings inside ifs shouldn't escape
+    # | s_if(l, branches) =>
+    #   # NOTE(dbp 2013-10-16): Adds a bunch of copies of env... woops
+    #   branches.map(get-bindings(_,envs)).foldl(
+    #     fun(binds, base): base.chain((_+_), binds) end, envs
+    #     )
     | s_datatype(l, name, params, variants, _) =>
-      variants.map(get-variant-bindings(name, _))^concat() +
-      [pair(name, arrowType([anyty], nmty("Bool"), moreRecord([])))] + env
-    | else => env
+      variants.map(get-variant-bindings(name, _)).foldl(
+        fun(binds, base): base.chainl((_+_), binds) end,
+        envs.chainl((_+_), [pair(name, arrowType([anyty], nmty("Bool"), moreRecord([])))])
+        )
+    | else => envs
   end
 where:
   fun gb-src(src):
-    get-bindings(A.parse(src,"anonymous-file", { ["check"]: false}).post-desugar.block, [])
+    get-bindings(A.parse(src,"anonymous-file", { ["check"]: false}).post-desugar.block,
+      pair([], default-type-env))
   end
   fun name-ty(name):
     baseType(baseTag("Number"), moreRecord([]))
   end
-  gb-src("x = 2") is [pair("x", name-ty("Number"))]
-  gb-src("x = 2 y = x") is [pair("x", name-ty("Number")),
-                            pair("y", name-ty("Number"))]
+  gb-src("x = 2") is pair([pair("x", name-ty("Number"))], default-type-env)
+  gb-src("x = 2 y = x") is pair([pair("x", name-ty("Number")),
+                            pair("y", name-ty("Number"))], default-type-env)
 end
 
 fun get-variant-bindings(tname :: String, variant :: A.Variant(fun(v):
@@ -350,8 +372,8 @@ end
 # is-inference: inferring types from the way they are used in check-blocks.    #
 ################################################################################
 
-fun is-inferred-functions(ast :: A.Expr, env) -> List<Pair<String, Type>>:
-  iif-curried = is-inferred-functions(_, env)
+fun is-inferred-functions(ast :: A.Expr, env, type-env) -> List<Pair<String, Type>>:
+  iif-curried = is-inferred-functions(_, env, type-env)
   fun find-is-pairs(name :: String, e :: A.Expr) -> List<Type>:
     cases(A.Expr) e:
       | s_block(l, stmts) => stmts.map(find-is-pairs(name, _))^concat()
@@ -365,8 +387,8 @@ fun is-inferred-functions(ast :: A.Expr, env) -> List<Pair<String, Type>>:
                 | s_id(l2, fname) =>
                   if fname == name:
                     # QUESTION(dbp 2013-10-21): Not sending inferred fns in - is that okay?
-                    [arrowType(args.map(fun(arg): tc(arg,[],env).type end),
-                        tc(right, [], env).type, moreRecord([]))]
+                    [arrowType(args.map(fun(arg): tc(arg,[],env,type-env).type end),
+                        tc(right, [], env, type-env).type, moreRecord([]))]
                   else:
                     []
                   end
@@ -395,7 +417,7 @@ fun is-inferred-functions(ast :: A.Expr, env) -> List<Pair<String, Type>>:
 where:
   fun iif-src(src):
     stx = A.parse(src,"anonymous-file", { ["check"]: false}).pre-desugar
-    is-inferred-functions(stx.block, [])
+    is-inferred-functions(stx.block, [], default-type-env)
   end
   baseRec = moreRecord([])
   iif-src("fun f(): 10 where: f() is 10 end") is
@@ -489,9 +511,18 @@ end
 # tc Helper functions.                                                         #
 ################################################################################
 
+default-type-env = [
+  "Bool",
+  "Number",
+  "String",
+  "Any",
+  "List",
+  "Nothing"
+]
+
 fun tc-file(p, s):
   top-type = baseType(topTag, moreRecord([]))
-  type-env = [
+  env = [
     pair("Any", top-type),
     pair("list", baseType(botTag,
         moreRecord([pair("map", top-type)]))),
@@ -499,26 +530,25 @@ fun tc-file(p, s):
         moreRecord([]))),
     pair("link", arrowType([dynType, dynType], nmty("List"), moreRecord([]))),
     pair("empty", nmty("List"))
-
   ]
   stx = s^A.parse(p, { ["check"]: false})
-  iifs = is-inferred-functions(stx.pre-desugar.block, type-env)
-  resultty = tc-prog(stx.with-types, iifs, type-env)
+  iifs = is-inferred-functions(stx.pre-desugar.block, env, default-type-env)
+  resultty = tc-prog(stx.with-types, iifs, env, default-type-env)
   # print(resultty.env.map(torepr).join-str("\n"))
   resultty
 end
 
-fun tc-prog(prog :: A.Program, iifs, env):
+fun tc-prog(prog :: A.Program, iifs, env, type-env):
   tc(prog.block, iifs, env)
 end
 
-fun tc-member(ast :: A.Member, iifs, env) -> Option<Pair<String,Type>>:
+fun tc-member(ast :: A.Member, iifs, env, type-env) -> Option<Pair<String,Type>>:
   cases(A.Member) ast:
     | s_data_field(l, name, value) =>
       # NOTE(dbp 2013-10-14): This is a bummer, but if it isn't
       # immediately obviously a string, not sure what to do.
       cases(A.Expr) name:
-        | s_str(l1, s) => some(pair(s, tc(value, iifs, env)))
+        | s_str(l1, s) => some(pair(s, tc(value, iifs, env, type-env)))
         | else => none
       end
     | else => none
@@ -533,11 +563,13 @@ end
 # Main typechecking function.                                                  #
 ################################################################################
 
-fun tc(ast :: A.Expr, iifs, env) -> TCResult:
-  newenv = get-bindings(ast,env)
-  dynR = tcResult(dynType, [], newenv)
-  nothingR = tcResult(nmty("Nothing"), [], newenv)
-  tc-curried = fun(expr): tc(expr, iifs, newenv) end
+fun tc(ast :: A.Expr, iifs, _env, _type-env) -> TCResult:
+  newenvs = get-bindings(ast,pair(_env,_type-env))
+  env = newenvs.a
+  type-env = newenvs.b
+  dynR = tcResult(dynType, [], env, type-env)
+  nothingR = tcResult(nmty("Nothing"), [], env, type-env)
+  tc-curried = fun(expr): tc(expr, iifs, env, type-env) end
   cases(A.Expr) ast:
     | s_block(l, stmts) => stmts.foldr(fun(stmt, base):
         t = tc-curried(stmt)
@@ -583,10 +615,10 @@ fun tc(ast :: A.Expr, iifs, env) -> TCResult:
                   get-type(b.ann)
                 end
               end
-              newenv1 = for map2(b from args, t from arg-tys):
+              env1 = for map2(b from args, t from arg-tys):
                 pair(b.id, t)
-              end + newenv
-              body-ty = tc(body, iifs, newenv1)
+              end + env
+              body-ty = tc(body, iifs, env1, type-env)
               ret-ty = if A.is-a_blank(ann): fty.ret else: get-type(ann) end
               if subtype(body-ty.type, ret-ty):
                 body-ty.set-type(arrowType(arg-tys, ret-ty, moreRecord([])))
@@ -612,8 +644,8 @@ fun tc(ast :: A.Expr, iifs, env) -> TCResult:
     | s_assign(l, id, val) => dynR
     | s_if(l, branches) => dynR
     | s_lam(l, ps, args, ann, doc, body, ck) =>
-      newenv1 = args.map(fun(b): pair(b.id, get-type(b.ann)) end) + newenv
-      body-ty = tc(body, iifs, newenv1)
+      env1 = args.map(fun(b): pair(b.id, get-type(b.ann)) end) + env
+      body-ty = tc(body, iifs, env1, type-env)
       if subtype(body-ty.type, get-type(ann)):
         body-ty.set-type(
           arrowType(args.map(fun(b): get-type(b.ann) end),
@@ -628,7 +660,7 @@ fun tc(ast :: A.Expr, iifs, env) -> TCResult:
     | s_extend(l, super, fields) =>
       base = tc-curried(super)
       for fold(ty from base, fld from fields):
-        cases(Option) tc-member(fld, iifs, newenv):
+        cases(Option) tc-member(fld, iifs, env, type-env):
             # NOTE(dbp 2013-10-14): this seems really bad... as we're
             # saying that if we can't figure it out, you can't use it...
           | none => ty
@@ -641,7 +673,7 @@ fun tc(ast :: A.Expr, iifs, env) -> TCResult:
     | s_update(l, super, fields) => dynR
     | s_obj(l, fields) =>
       res = for fold(acc from pair(dynR, normalRecord([])), f from fields):
-        cases(option.Option) tc-member(f, iifs, newenv):
+        cases(option.Option) tc-member(f, iifs, env, type-env):
           | none => pair(acc.a, moreRecord(acc.b.fields))
             # NOTE(dbp 2013-10-16): This is a little bit of a hack -
             # to reuse the helper that wants to operate on types.
@@ -679,14 +711,14 @@ fun tc(ast :: A.Expr, iifs, env) -> TCResult:
           fn-ty.add-error(l, msg(errApplyNonFunction, [fmty(fn-ty)])).set-type(dynType)
       end
     | s_id(l, id) =>
-      cases(option.Option) map-get(newenv, id):
+      cases(option.Option) map-get(env, id):
         # we won't actually get here, because we do unboundness typechecking already
         | none => dynR.add-error(l, msg(errUnboundIdentifier, [id]))
-        | some(ty) => tcResult(ty,[],newenv)
+        | some(ty) => tcResult(ty,[],env,type-env)
       end
-    | s_num(l, num) => tcResult(baseType(baseTag("Number"), moreRecord([])),[],newenv)
-    | s_bool(l, bool) => tcResult(baseType(baseTag("Bool"), moreRecord([])),[],newenv)
-    | s_str(l, str) => tcResult(baseType(baseTag("String"), moreRecord([])),[],newenv)
+    | s_num(l, num) => tcResult(baseType(baseTag("Number"), moreRecord([])),[],env,type-env)
+    | s_bool(l, bool) => tcResult(baseType(baseTag("Bool"), moreRecord([])),[],env,type-env)
+    | s_str(l, str) => tcResult(baseType(baseTag("String"), moreRecord([])),[],env,type-env)
     | s_get_bang(l, obj, str) => dynR
     | s_bracket(l, obj, field) =>
       cases(A.Expr) field:
@@ -728,7 +760,7 @@ fun tc(ast :: A.Expr, iifs, env) -> TCResult:
         branches.foldr(fun(branch, ty-ers):
             # TODO(dbp 2013-10-30): Need to have a data-env, so we can
             # pick up non-bound constructors.
-            cases(Option) map-get(newenv, branch.name):
+            cases(Option) map-get(env, branch.name):
               | none => ty-ers.add-error(branch.l,
                   msg(errCasesBranchInvalidVariant, [fmty(type), branch.name])
                   )
@@ -752,7 +784,7 @@ fun tc(ast :: A.Expr, iifs, env) -> TCResult:
                       # tricky, so we'll opt for a temporary but dynless solution -
                       # set it to the first branches type, and make
                       # sure all the rest are equal.
-                      branchenv = newenv +
+                      branchenv = env +
                           for map2(bind from branch.args,
                                    argty from args):
                             pair(bind.id, argty)
