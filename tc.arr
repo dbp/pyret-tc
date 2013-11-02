@@ -87,6 +87,7 @@ sharing:
 end
 
 fun <K,V> Map(o): List(o) end
+fun <V> Set-(o): List(o) end
 
 data RecordType:
   | normalRecord(fields :: Map<String,Type>)
@@ -101,6 +102,8 @@ sharing:
     end
   end
 end
+
+
 
 
 # NOTE(dbp 2013-10-30): env included for debugging / tooling. It
@@ -204,6 +207,17 @@ where:
   map-get([pair(1,3),pair('f',7)], 'fo') is none
 end
 
+fun <V> set-get(s :: Set-<V>, v :: V) -> Bool:
+  cases(List) s:
+    | empty => false
+    | link(f, r) => (v == f) or set-get(r, v)
+  end
+where:
+  set-get(["a", "b", "c"], "a") is true
+  set-get(["a", "b", "c"], "aa") is false
+  set-get([], []) is false
+end
+
 fun concat(l :: List<List>) -> List:
   l.foldr(fun(f,r): f.append(r) end, [])
 where:
@@ -221,16 +235,32 @@ fun nmty(name :: String) -> Type:
   baseType(baseTag(name), moreRecord([]))
 end
 
-fun get-type(ann :: A.Ann) -> Type:
+fun get-type(ann :: A.Ann, env, type-env) -> TCResult:
+  res = tcResult(dynType, [], env, type-env)
   cases(A.Ann) ann:
-    | a_blank => dynType
-    | a_any => dynType
-    | a_name(l, id) => nmty(id)
-    | a_arrow(l, args, ret) => arrowType(args.map(get-type), get-type(ret), moreRecord([]))
+    | a_blank => res
+    | a_any => res
+    | a_name(l, id) =>
+      if set-get(type-env, id):
+        res.set-type(nmty(id))
+      else:
+        res.add-error(l, msg(errTypeNotDefined, fmty(nmty(id))))
+      end
+    | a_arrow(l, args, ret) =>
+        retty = get-type(ret, env, type-env)
+        argsty = args.map(get-type(_, env, type-env))
+        newres = for fold(base from retty, argty from argsty):
+          base.merge-messages(argty)
+        end
+        newres.set-type(arrowType(argsty.map(fun(r): r.type end), retty.type, moreRecord([])))
     | a_record(l, fields) =>
+      fieldsty = fields.map(fun(field): pair(field.name, get-type(field.ann, env, type-env)) end)
+      newres = for fold(base from res, fieldty from fieldsty):
+        base.merge-messages(fieldty.b)
+      end
       baseType(
         topTag,
-        normalRecord(fields.map(fun(field): pair(field.name, get-type(field.ann)) end))
+        normalRecord(fieldsty.map(fun(p): p.chainr(fun(r): r.type end) end))
         )
     | else => dynType
   end
@@ -266,6 +296,7 @@ end
 fun get-bindings(ast :: A.Expr, envs) -> Pair<List<Pair<String, Type>>,List<String>>:
   doc: "This function implements letrec behavior."
   anyty = baseType(topTag, moreRecord([]))
+  gt = get-type(_, envs.a, envs.b)
   cases(A.Expr) ast:
     | s_block(l, stmts) =>
       stmts.foldl(fun(stmt, newenvs):
@@ -277,13 +308,13 @@ fun get-bindings(ast :: A.Expr, envs) -> Pair<List<Pair<String, Type>>,List<Stri
       if A.is-a_blank(name.ann):
         envs.chainl((_+_), [pair(name.id, tc(val, [], envs.a, envs.b).type)])
       else:
-        envs.chainl((_+_), [pair(name.id, get-type(name.ann))])
+        envs.chainl((_+_), [pair(name.id, gt(name.ann))])
       end
     | s_let(l, name, val) =>
       if A.is-a_blank(name.ann):
         envs.chainl((_+_), [pair(name.id, tc(val, [], envs.a, envs.b).type)])
       else:
-        envs.chainl((_+_), [pair(name.id, get-type(name.ann))])
+        envs.chainl((_+_), [pair(name.id, gt(name.ann))])
       end
       # NOTE(dbp 2013-11-01): Not including, as bindings inside ifs shouldn't escape
     # | s_if(l, branches) =>
@@ -292,7 +323,7 @@ fun get-bindings(ast :: A.Expr, envs) -> Pair<List<Pair<String, Type>>,List<Stri
     #     fun(binds, base): base.chain((_+_), binds) end, envs
     #     )
     | s_datatype(l, name, params, variants, _) =>
-      variants.map(get-variant-bindings(name, _)).foldl(
+      variants.map(get-variant-bindings(name, _, envs.a, envs.b)).foldl(
         fun(binds, base): base.chainl((_+_), binds) end,
         envs.chainl((_+_), [pair(name, arrowType([anyty], nmty("Bool"), moreRecord([])))])
         )
@@ -313,12 +344,13 @@ end
 
 fun get-variant-bindings(tname :: String, variant :: A.Variant(fun(v):
                                      A.is-s_datatype_variant(v) or
-                                     A.is-s_datatype_singleton_variant(v) end)) ->
+                                     A.is-s_datatype_singleton_variant(v) end),
+    env, type-env) ->
     List<Pair<String, Type>>:
   bigty = baseType(baseTag(tname), moreRecord([]))
   anyty = baseType(topTag, moreRecord([]))
   boolty = baseType(baseTag("Bool"), moreRecord([]))
-  fun get-member-type(m): get-type(m.bind.ann) end
+  fun get-member-type(m): get-type(m.bind.ann, env, type-env) end
   cases(A.Variant) variant:
       # NOTE(dbp 2013-10-30): Should type check constructor here, get methods/fields.
     | s_datatype_variant(l, vname, members, constr) =>
@@ -341,7 +373,8 @@ where:
   get-variant-bindings("Foo",
     A.s_datatype_variant(dummy-loc, "foo",
     [],
-    A.s_datatype_constructor(dummy-loc, "self", A.s_id(dummy-loc, "self"))))
+    A.s_datatype_constructor(dummy-loc, "self", A.s_id(dummy-loc, "self"))),
+    [], [])
   is
   [pair("foo", arrowType([], footy, moreRecord([]))),
   pair("is-foo", arrowType([anyty], boolty, moreRecord([])))]
@@ -349,7 +382,8 @@ where:
   get-variant-bindings("Foo",
     A.s_datatype_variant(dummy-loc, "foo",
     [A.s_variant_member(dummy-loc, "normal", A.s_bind(dummy-loc, "a", A.a_name(dummy-loc, "String")))],
-      A.s_datatype_constructor(dummy-loc, "self", A.s_id(dummy-loc, "self"))))
+      A.s_datatype_constructor(dummy-loc, "self", A.s_id(dummy-loc, "self"))),
+    [],[])
   is
   [pair("foo", arrowType([strty], footy, moreRecord([]))),
   pair("is-foo", arrowType([anyty], boolty, moreRecord([])))]
@@ -361,7 +395,8 @@ where:
         A.s_bind(dummy-loc, "a", A.a_name(dummy-loc, "String"))),
     A.s_variant_member(dummy-loc, "normal",
         A.s_bind(dummy-loc, "b", A.a_name(dummy-loc, "Bool")))],
-    A.s_datatype_constructor(dummy-loc, "self", A.s_id(dummy-loc, "self"))))
+    A.s_datatype_constructor(dummy-loc, "self", A.s_id(dummy-loc, "self"))),
+    [],[])
   is
   [pair("foo", arrowType([strty, boolty], footy, moreRecord([]))),
   pair("is-foo", arrowType([anyty], boolty, moreRecord([])))]
@@ -515,7 +550,6 @@ default-type-env = [
   "Bool",
   "Number",
   "String",
-  "Any",
   "List",
   "Nothing"
 ]
@@ -567,6 +601,7 @@ fun tc(ast :: A.Expr, iifs, _env, _type-env) -> TCResult:
   newenvs = get-bindings(ast,pair(_env,_type-env))
   env = newenvs.a
   type-env = newenvs.b
+  gt = get-type(_, env, type-env)
   dynR = tcResult(dynType, [], env, type-env)
   nothingR = tcResult(nmty("Nothing"), [], env, type-env)
   tc-curried = fun(expr): tc(expr, iifs, env, type-env) end
@@ -583,7 +618,7 @@ fun tc(ast :: A.Expr, iifs, _env, _type-env) -> TCResult:
       # rule actually makes this easier, because since the iifs are
       # all top level, if we find a binding anywhere that has that
       # name, it must be the function.
-      bindty = get-type(name.ann)
+      bindty = gt(name.ann)
       cases(option.Option) map-get(iifs, name.id):
         | none =>
           ty = tc-curried(val)
@@ -612,14 +647,14 @@ fun tc(ast :: A.Expr, iifs, _env, _type-env) -> TCResult:
                   end
                   inf
                 else:
-                  get-type(b.ann)
+                  gt(b.ann)
                 end
               end
               env1 = for map2(b from args, t from arg-tys):
                 pair(b.id, t)
               end + env
               body-ty = tc(body, iifs, env1, type-env)
-              ret-ty = if A.is-a_blank(ann): fty.ret else: get-type(ann) end
+              ret-ty = if A.is-a_blank(ann): fty.ret else: gt(ann) end
               if subtype(body-ty.type, ret-ty):
                 body-ty.set-type(arrowType(arg-tys, ret-ty, moreRecord([])))
               else:
@@ -644,17 +679,17 @@ fun tc(ast :: A.Expr, iifs, _env, _type-env) -> TCResult:
     | s_assign(l, id, val) => dynR
     | s_if(l, branches) => dynR
     | s_lam(l, ps, args, ann, doc, body, ck) =>
-      env1 = args.map(fun(b): pair(b.id, get-type(b.ann)) end) + env
+      env1 = args.map(fun(b): pair(b.id, gt(b.ann)) end) + env
       body-ty = tc(body, iifs, env1, type-env)
-      if subtype(body-ty.type, get-type(ann)):
+      if subtype(body-ty.type, gt(ann)):
         body-ty.set-type(
-          arrowType(args.map(fun(b): get-type(b.ann) end),
-            get-type(ann), moreRecord([]))
+          arrowType(args.map(fun(b): gt(b.ann) end),
+            gt(ann), moreRecord([]))
           )
       else:
         body-ty.set-type(dynType).add-error(l,
           msg(errFunctionAnnIncompatibleReturn,
-            [fmty(body-ty), fmty(get-type(ann))]))
+            [fmty(body-ty), fmty(gt(ann))]))
       end
     | s_method(l, args, ann, doc, body, ck) => dynR
     | s_extend(l, super, fields) =>
@@ -750,7 +785,7 @@ fun tc(ast :: A.Expr, iifs, _env, _type-env) -> TCResult:
       # NOTE(dbp 2013-10-30): Should statements have type nothing?
       nothingR
     | s_cases(l, _type, val, branches) =>
-      type = get-type(_type)
+      type = gt(_type)
       val-ty = tc-curried(val)
       if not subtype(type, val-ty.type):
         dynR.add-error(l,
