@@ -1,9 +1,6 @@
 #lang pyret
 
-A = Any
-B = Any
-
-fun my-map(fn :: (A -> B), l :: List<A>) -> List<B>:
+fun my-map(fn :: (Any -> Any), l :: List<Any>) -> List<Any>:
   cases(List) l:
     | empty => empty
     | link(f,r) => link(fn(f),my-map(fn, r))

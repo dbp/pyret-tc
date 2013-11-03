@@ -393,8 +393,10 @@ fun get-type(ann :: A.Ann) -> TCST<Type>:
           if set-get(type-env, id):
             return(nmty(id))
           else:
-            add-error(l, msg(errTypeNotDefined, [fmty(nmty(id))]))^seq(
-              return(dynType))
+            # temporarily removing this error.
+            return(nmty(id))
+            #add-error(l, msg(errTypeNotDefined, [fmty(nmty(id))]))^seq(
+            #  return(dynType))
           end
         end)
     | a_arrow(l, args, ret) =>
@@ -450,7 +452,11 @@ fun get-bindings(ast :: A.Expr) -> TCST<List<Pair<String, Type>>>:
   anyty = baseType(topTag, moreRecord([]))
   fun name-val-binds(name, val):
     if A.is-a_blank(name.ann):
-      tc(val)^bind(fun(ty): return([pair(name.id, ty)]) end)
+      # NOTE(dbp 2013-11-03): Giving the id dyn seems wrong... but
+      # also not sure what else to do, as we need some type for
+      # desugared recursive functions.
+      add-bindings([pair(name.id, dynType)],
+        tc(val)^bind(fun(ty): return([pair(name.id, ty)]) end))
     else:
       get-type(name.ann)^bind(fun(ty): return([pair(name.id, ty)]) end)
     end
@@ -473,7 +479,7 @@ fun get-bindings(ast :: A.Expr) -> TCST<List<Pair<String, Type>>>:
     #     fun(binds, base): base.chain((_+_), binds) end, envs
     #     )
     | s_datatype(l, name, params, variants, _) =>
-      sequence(variants.map(get-variant-bindings(name)))^bind(fun(vbs):
+      sequence(variants.map(get-variant-bindings(name, _)))^bind(fun(vbs):
          return(vbs^concat() + [pair(name, arrowType([anyty], nmty("Bool"), moreRecord([])))])
         end)
     | else => return([])
@@ -696,6 +702,7 @@ end
 ################################################################################
 
 default-type-env = [
+  "Any",
   "Bool",
   "Number",
   "String",
@@ -748,6 +755,7 @@ end
 
 fun tc(ast :: A.Expr) -> TCST<Type>:
   get-bindings(ast)^bind(fun(bindings):
+      #print(bindings)
       add-bindings(bindings,
         cases(A.Expr) ast:
           | s_block(l, stmts) => sequence(stmts.map(tc))^bind(
@@ -769,7 +777,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                         tc(val)^bind(fun(ty):
                             if not subtype(ty, bindty):
                               add-error(l, msg(errAssignWrongType,
-                                  [name.id, fmty(bindty), fmty(ty.type)]))^seq(
+                                  [name.id, fmty(bindty), fmty(ty)]))^seq(
                                 return(dynType))
                             else:
                               return(ty)
@@ -892,7 +900,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                               if not subtype(av, at):
                                 arg-error := true
                                 add-error(l,
-                                  msg(errArgumentBadType, [counter, fmty(at), fmty(av.type)]))
+                                  msg(errArgumentBadType, [counter, fmty(at), fmty(av)]))
                               else:
                                 return(nothing)
                               end
@@ -953,7 +961,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                   fun(val-ty):
                     if not subtype(type, val-ty):
                       add-error(l,
-                        msg(errCasesValueBadType, [fmty(type), fmty(val-ty.type)])
+                        msg(errCasesValueBadType, [fmty(type), fmty(val-ty)])
                         )^seq(return(dynType))
                     else:
                       get-env()^bind(
@@ -1000,7 +1008,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                                                   else:
                                                     add-error(branch.l,
                                                       msg(errCasesBranchType, [branch.name])
-                                                      ).seq(return(branches-ty))
+                                                      )^seq(return(branches-ty))
                                                   end
                                                 end
                                               end))
@@ -1009,7 +1017,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                                         if ty <> type:
                                           add-error(branch.l,
                                             msg(errCasesBranchInvalidVariant, [fmty(type), branch.name])
-                                            ).seq(return(dynType))
+                                            )^seq(return(dynType))
                                         else:
                                           tc(branch.body)^bind(fun(branchty):
                                               if branches-ty == dynType:
@@ -1021,7 +1029,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                                                 else:
                                                   add-error(branch.l,
                                                     msg(errCasesBranchType, [branch.name])
-                                                    ).seq(return(branches-ty))
+                                                    )^seq(return(branches-ty))
                                                 end
                                               end
                                             end)
@@ -1032,7 +1040,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                                           )^seq(dynType)
                                     end
                                 end
-                              end))
+                              end))^seq(return(branches-ty))
                         end)
                     end
                   end)
@@ -1079,6 +1087,12 @@ fun usage():
    raco pyret tc.arr tests (runs all tests)\n
    raco pyret tc.arr file.arr (runs single file)\n\n(running basic unit tests)\n")
 end
+fun format-errors(ers):
+  cases(List) ers:
+    | empty => "No type errors detected."
+    | link(_,_) => ers.map(torepr).join-str("\n")
+  end
+end
 cmdlinelen = baseR("vector-length",cmdlineargs)
 if cmdlinelen == 0:
   usage()
@@ -1106,11 +1120,11 @@ else:
         code = F.input-file(path).read-file()
         err = F.input-file(errpath).read-file()
         if err.length() <> 0:
-          err-msg = tc-file(path, code).map(torepr).join-str("\n")
+          err-msg = format-errors(tc-file(path, code))
           pair(path,pair(err-msg, err-msg.contains(err)))
           is pair(path, pair(err-msg, true))
         else:
-          err-msg = tc-file(path, code).map(torepr).join-str("\n")
+          err-msg = format-errors(tc-file(path, code))
           pair(path, pair(err-msg,
               err-msg.contains("No type errors detected.")))
           is pair(path,pair(err-msg, true))
