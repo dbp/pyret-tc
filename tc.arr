@@ -39,15 +39,6 @@ data Pair:
 sharing:
   _equals(self, other):
     (self.a == other.a) and (self.b == other.b)
-  end,
-  chain(self, op, other):
-    pair(op(self.a, other.a), op(self.b, other.b))
-  end,
-  chainl(self, op, arg):
-    pair(op(self.a, arg), self.b)
-  end,
-  chainr(self, op, arg):
-    pair(self.a, op(self.b, arg))
   end
 end
 
@@ -111,11 +102,13 @@ end
 #                                                                   #
 #####################################################################
 
-data TCSTate:
+data TCstate:
   | tcst(value, errors, iifs, env, type-env)
 end
 # NOTE(dbp 2013-11-02): The type we want is a parametric alias for an S -> Pair<V,S> function.
 TCST = Function
+
+# First the fundamental monad functions
 fun return(v):
   fun(er,i,e,t): tcst(v,er,i,e,t) end
 end
@@ -128,6 +121,8 @@ end
 fun seq(mv1, mv2):
   bind(mv1, fun(_): mv2 end)
 end
+
+# Next the common monad helpers
 fun sequence(mvs):
   mvs.foldr(fun(m, mbase):
       bind(mbase, fun(base):
@@ -144,6 +139,7 @@ fun foldm(fn, base, lst):
   end
 end
 
+# After that, the state-related functions
 fun get-errors():
   fun(er,i,e,t):
     tcst(er,er,i,e,t)
@@ -203,14 +199,11 @@ fun exec-type-env(st-prog, errs, iifs, env, type-env):
   st-prog(errs,iifs,env,type-env).type-env
 end
 
-# NOTE(dbp 2013-11-01): Errors and iifs are threaded, envs are NOT.
+# And finally, application specific actions (note that errors are
+# threaded, binds and types are not.)
 fun add-error(l,e):
   doc: "adds an error to the threaded state"
   get-errors()^bind(fun(errors): put-errors(errors + [pair(l,e)]) end)
-end
-fun add-iif(name, type):
-  doc: "adds an inferred function to the threaded state"
-  get-iifs()^bind(fun(iifs): put-iifs([pair(name, type)] + iifs) end)
 end
 fun add-bindings(binds, mv):
   doc: "adds bindings to the env, in the context of a monadic value"
@@ -254,29 +247,6 @@ check:
     [], [], [], []
     ) is [pair("a", "T")]
 end
-
-# # NOTE(dbp 2013-10-30): env included for debugging / tooling. It
-# # should never be used for typechecking.
-# data TCResult:
-#   | tcResult(type :: Type, errors :: List<TypeError>, env, type-env) with:
-#     set-type(self, ty :: Type):
-#       tcResult(ty, self.errors, self.env, self.type-env)
-#     end,
-#     add-error(self, l :: Loc, er :: String):
-#       tcResult(self.type, self.errors + [typeError(l,er)], self.env, self.type-env)
-#     end,
-#     merge-messages(self, other :: TCResult):
-#       tcResult(self.type, self.errors + other.errors, self.env, self.type-env)
-#     end
-# sharing:
-#   format-errors(self):
-#     if (self.errors.length() == 0):
-#       "No type errors detected."
-#     else:
-#       "Errors:\n" + torepr(self.errors)
-#     end
-#   end
-# end
 
 
 ################################################################################
