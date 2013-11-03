@@ -858,23 +858,26 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                 | s_assign(l, id, val) => return(dynType)
                 | s_if(l, branches) => return(dynType)
                 | s_lam(l, ps, args, ann, doc, body, ck) =>
-                  get-type(ann)^bind(fun(ret-ty):
-                      sequence(args.map(fun(b): get-type(b.ann)^bind(fun(t): return(pair(b.id, t)) end) end))^bind(fun(new-binds):
-                          add-bindings(new-binds,
-                            tc(body)^bind(fun(body-ty):
-                                if subtype(body-ty, ret-ty):
-                                  return(arrowType(new-binds.map(fun(bnd): bnd.b end), ret-ty, moreRecord([])))
-                                else:
-                                  add-error(l,
-                                    msg(errFunctionAnnIncompatibleReturn,
-                                      [fmty(body-ty), fmty(ret-ty)]))^seq(
-                                    return(dynType))
-                                end
-                              end)
-                            )
-                        end)
-                    end)
-                | s_method(l, args, ann, doc, body, ck) => return(dynType)
+                  # NOTE(dbp 2013-11-03): Check for type shadowing.
+                  add-types(ps,
+                    get-type(ann)^bind(fun(ret-ty):
+                        sequence(args.map(fun(b): get-type(b.ann)^bind(fun(t): return(pair(b.id, t)) end) end))^bind(fun(new-binds):
+                            add-bindings(new-binds,
+                              tc(body)^bind(fun(body-ty):
+                                  if subtype(body-ty, ret-ty):
+                                    return(arrowType(new-binds.map(fun(bnd): bnd.b end), ret-ty, moreRecord([])))
+                                  else:
+                                    add-error(l,
+                                      msg(errFunctionAnnIncompatibleReturn,
+                                        [fmty(body-ty), fmty(ret-ty)]))^seq(
+                                      return(dynType))
+                                  end
+                                end)
+                              )
+                          end)
+                      end)
+                    )
+                  | s_method(l, args, ann, doc, body, ck) => return(dynType)
                 | s_extend(l, super, fields) =>
                   tc(super)^bind(fun(base):
                       for foldm(ty from base, fld from fields):
