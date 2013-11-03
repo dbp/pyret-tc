@@ -94,8 +94,6 @@ sharing:
   end
 end
 
-
-
 #####################################################################
 #                                                                   #
 #     This is a big State Monad, so we can thread all the stuff.    #
@@ -447,9 +445,11 @@ fun get-bindings(ast :: A.Expr) -> TCST<List<Pair<String, Type>>>:
     #     fun(binds, base): base.chain((_+_), binds) end, envs
     #     )
     | s_datatype(l, name, params, variants, _) =>
-      sequence(variants.map(get-variant-bindings(name, _)))^bind(fun(vbs):
-         return(vbs^concat() + [pair(name, arrowType([anyty], nmty("Bool"), moreRecord([])))])
-        end)
+      add-types(params,
+        sequence(variants.map(get-variant-bindings(name, _)))^bind(fun(vbs):
+            return(vbs^concat() + [pair(name, arrowType([anyty], nmty("Bool"), moreRecord([])))])
+          end)
+        )
     | else => return([])
   end
 where:
