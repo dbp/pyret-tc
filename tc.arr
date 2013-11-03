@@ -222,12 +222,12 @@ fun add-bindings(binds, mv):
           end))
     end)
 end
-fun add-type(name, mv):
-  doc: "adds a type to the type-env, in the context of a monadic value"
-  get-type-env()^bind(fun(old-env):
-      put-type-env([name] + old-env)^seq(
+fun add-types(names, mv):
+  doc: "adds types to the type-env, in the context of a monadic value"
+  get-type-env()^bind(fun(old-type-env):
+      put-type-env(names + old-type-env)^seq(
         mv^bind(fun(val):
-            put-type-env(old-env)^seq(
+            put-type-env(old-type-env)^seq(
               return(val))
           end))
     end)
@@ -393,10 +393,8 @@ fun get-type(ann :: A.Ann) -> TCST<Type>:
           if set-get(type-env, id):
             return(nmty(id))
           else:
-            # temporarily removing this error.
-            return(nmty(id))
-            #add-error(l, msg(errTypeNotDefined, [fmty(nmty(id))]))^seq(
-            #  return(dynType))
+            add-error(l, msg(errTypeNotDefined, [fmty(nmty(id))]))^seq(
+              return(dynType))
           end
         end)
     | a_arrow(l, args, ret) =>
@@ -486,7 +484,7 @@ fun get-bindings(ast :: A.Expr) -> TCST<List<Pair<String, Type>>>:
   end
 where:
   fun gb-src(src):
-    eval(get-bindings(A.parse(src,"anonymous-file", { ["check"]: false}).post-desugar.block), [], [], [], default-type-env)
+    eval(get-bindings(A.parse(src,"anonymous-file", { ["check"]: false}).with-types.block), [], [], [], default-type-env)
   end
   gb-src("x = 2") is [pair("x", nmty("Number"))]
   gb-src("x = 2 y = x") is [ pair("y", nmty("Number")),
@@ -553,6 +551,25 @@ where:
   is
   [pair("foo", arrowType([strty, boolty], footy, moreRecord([]))),
   pair("is-foo", arrowType([anyty], boolty, moreRecord([])))]
+end
+
+fun get-type-bindings(ast :: A.Expr) -> TCST<List<Pair<String>>>:
+  cases(A.Expr) ast:
+    | s_block(l, stmts) =>
+      sequence(stmts.map(get-type-bindings))^bind(fun(bs): return(concat(bs)) end)
+    | s_user_block(l, block) => get-type-bindings(block)
+    | s_datatype(l, name, _, _, _) =>
+      return([name])
+    | else => return([])
+  end
+where:
+  fun gtb-src(src):
+    eval(get-type-bindings(A.parse(src,"anonymous-file", { ["check"]: false}).with-types.block), [], [], [], [])
+  end
+  gtb-src("x = 2") is []
+  gtb-src("datatype Foo: | foo with constructor(self): self end end") is ["Foo"]
+  gtb-src("datatype Foo: | foo with constructor(self): self end end
+           datatype Bar: | bar with constructor(self): self end end") is ["Foo", "Bar"]
 end
 
 
@@ -756,300 +773,304 @@ end
 ################################################################################
 
 fun tc(ast :: A.Expr) -> TCST<Type>:
-  get-bindings(ast)^bind(fun(bindings):
-      #print(bindings)
-      add-bindings(bindings,
-        cases(A.Expr) ast:
-          | s_block(l, stmts) => sequence(stmts.map(tc))^bind(
-              fun(tys):
-                return(if tys == []: nmty("Nothing") else: tys.last() end)
-              end)
-          | s_user_block(l, block) => tc(block)
-          | s_var(l, name, val) => return(dynType)
-          | s_let(l, name, val) =>
-            # NOTE(dbp 2013-10-21): Ugly hack. We want to find
-            # desugared funs, so we look for let bindings. Our no-shadowing
-            # rule actually makes this easier, because since the iifs are
-            # all top level, if we find a binding anywhere that has that
-            # name, it must be the function.
-            get-type(name.ann)^bind(fun(bindty):
-                get-iifs()^bind(fun(iifs):
-                    cases(option.Option) map-get(iifs, name.id):
-                      | none =>
-                        tc(val)^bind(fun(ty):
-                            if not subtype(ty, bindty):
-                              add-error(l, msg(errAssignWrongType,
-                                  [name.id, fmty(bindty), fmty(ty)]))^seq(
-                                return(dynType))
-                            else:
-                              return(ty)
-                            end
-                          end)
-                      | some(fty) =>
-                        # NOTE(dbp 2013-10-21): we want to type check the function
-                        # bound with our inferred type, unless they provided their
-                        # own type. In the case of a type error when inference was
-                        # involved we want to alter the error messages.
-                        cases(A.Expr) val:
-                          | s_lam(l1, ps, args, ann, doc, body, ck) =>
-                            # NOTE(dbp 2013-10-21): Gah, mutation. This code should
-                            # be refactored.
-                            var inferred = false
-                            sequence(for map2(b from args, inf from fty.args):
-                                if A.is-a_blank(b.ann):
-                                  when inf <> dynType:
-                                    inferred := true
+  get-type-bindings(ast)^bind(fun(newtypes):
+      add-types(newtypes,
+        get-bindings(ast)^bind(fun(bindings):
+            add-bindings(bindings,
+              cases(A.Expr) ast:
+                | s_block(l, stmts) => sequence(stmts.map(tc))^bind(
+                    fun(tys):
+                      return(if tys == []: nmty("Nothing") else: tys.last() end)
+                    end)
+                | s_user_block(l, block) => tc(block)
+                | s_var(l, name, val) => return(dynType)
+                | s_let(l, name, val) =>
+                  # NOTE(dbp 2013-10-21): Ugly hack. We want to find
+                  # desugared funs, so we look for let bindings. Our no-shadowing
+                  # rule actually makes this easier, because since the iifs are
+                  # all top level, if we find a binding anywhere that has that
+                  # name, it must be the function.
+                  get-type(name.ann)^bind(fun(bindty):
+                      get-iifs()^bind(fun(iifs):
+                          cases(option.Option) map-get(iifs, name.id):
+                            | none =>
+                              tc(val)^bind(fun(ty):
+                                  if not subtype(ty, bindty):
+                                    add-error(l, msg(errAssignWrongType,
+                                        [name.id, fmty(bindty), fmty(ty)]))^seq(
+                                      return(dynType))
+                                  else:
+                                    return(ty)
                                   end
-                                  return(inf)
-                                else:
-                                  get-type(b.ann)
-                                end
-                              end)^bind(fun(arg-tys):
-                                add-bindings(for map2(b from args, t from arg-tys):
-                                    pair(b.id, t)
-                                  end,
-                                  tc(body)^bind(fun(body-ty):
-                                      (if A.is-a_blank(ann): return(fty.ret) else: get-type(ann) end)^bind(fun(ret-ty):
-                                          if subtype(body-ty, ret-ty):
-                                            return(arrowType(arg-tys, ret-ty, moreRecord([])))
-                                          else:
-                                            add-error(l,
-                                              if inferred:
-                                                msg(errFunctionInferredIncompatibleReturn,
-                                                  [fmty(body-ty), fmty(ret-ty)])
-                                              else:
-                                                msg(errFunctionAnnIncompatibleReturn,
-                                                  [fmty(body-ty), fmty(ret-ty)])
-                                              end)^seq(return(dynType))
-                                          end
-                                        end)
+                                end)
+                            | some(fty) =>
+                              # NOTE(dbp 2013-10-21): we want to type check the function
+                              # bound with our inferred type, unless they provided their
+                              # own type. In the case of a type error when inference was
+                              # involved we want to alter the error messages.
+                              cases(A.Expr) val:
+                                | s_lam(l1, ps, args, ann, doc, body, ck) =>
+                                  # NOTE(dbp 2013-10-21): Gah, mutation. This code should
+                                  # be refactored.
+                                  var inferred = false
+                                  sequence(for map2(b from args, inf from fty.args):
+                                      if A.is-a_blank(b.ann):
+                                        when inf <> dynType:
+                                          inferred := true
+                                        end
+                                        return(inf)
+                                      else:
+                                        get-type(b.ann)
+                                      end
+                                    end)^bind(fun(arg-tys):
+                                      add-bindings(for map2(b from args, t from arg-tys):
+                                          pair(b.id, t)
+                                        end,
+                                        tc(body)^bind(fun(body-ty):
+                                            (if A.is-a_blank(ann): return(fty.ret) else: get-type(ann) end)^bind(fun(ret-ty):
+                                                if subtype(body-ty, ret-ty):
+                                                  return(arrowType(arg-tys, ret-ty, moreRecord([])))
+                                                else:
+                                                  add-error(l,
+                                                    if inferred:
+                                                      msg(errFunctionInferredIncompatibleReturn,
+                                                        [fmty(body-ty), fmty(ret-ty)])
+                                                    else:
+                                                      msg(errFunctionAnnIncompatibleReturn,
+                                                        [fmty(body-ty), fmty(ret-ty)])
+                                                    end)^seq(return(dynType))
+                                                end
+                                              end)
+                                          end)
+                                        )
                                     end)
-                                  )
-                              end)
-                          | else =>
-                            # NOTE(dbp 2013-10-21): This is a bizarre case. It means
-                            # we no longer understand the desugaring, so we really
-                            # should abort and figure our stuff out.
-                            raise("Type Checker error: encountered a let binding that
-                              should have been a function, but wasn't (at loc " +
-                              torepr(l) + ")")
-                        end
-                    end
-                  end)
-              end)
-          | s_assign(l, id, val) => return(dynType)
-          | s_if(l, branches) => return(dynType)
-          | s_lam(l, ps, args, ann, doc, body, ck) =>
-            get-type(ann)^bind(fun(ret-ty):
-                sequence(args.map(fun(b): get-type(b.ann)^bind(fun(t): return(pair(b.id, t)) end) end))^bind(fun(new-binds):
-                    add-bindings(new-binds,
-                      tc(body)^bind(fun(body-ty):
-                          if subtype(body-ty, ret-ty):
-                            return(arrowType(new-binds.map(fun(bnd): bnd.b end), ret-ty, moreRecord([])))
-                          else:
-                            add-error(l,
-                              msg(errFunctionAnnIncompatibleReturn,
-                                [fmty(body-ty), fmty(ret-ty)]))^seq(
-                              return(dynType))
+                                | else =>
+                                  # NOTE(dbp 2013-10-21): This is a bizarre case. It means
+                                  # we no longer understand the desugaring, so we really
+                                  # should abort and figure our stuff out.
+                                  raise("Type Checker error: encountered a let binding that
+                                    should have been a function, but wasn't (at loc " +
+                                    torepr(l) + ")")
+                              end
                           end
                         end)
-                      )
-                  end)
-              end)
-          | s_method(l, args, ann, doc, body, ck) => return(dynType)
-          | s_extend(l, super, fields) =>
-            tc(super)^bind(fun(base):
-                for foldm(ty from base, fld from fields):
-                  tc-member(fld)^bind(fun(mty):
-                      cases(Option) mty:
-                        | none => return(ty)
-                        | some(fldty) =>
-                          return(type-record-add(ty, fldty.a, fldty.b))
+                    end)
+                | s_assign(l, id, val) => return(dynType)
+                | s_if(l, branches) => return(dynType)
+                | s_lam(l, ps, args, ann, doc, body, ck) =>
+                  get-type(ann)^bind(fun(ret-ty):
+                      sequence(args.map(fun(b): get-type(b.ann)^bind(fun(t): return(pair(b.id, t)) end) end))^bind(fun(new-binds):
+                          add-bindings(new-binds,
+                            tc(body)^bind(fun(body-ty):
+                                if subtype(body-ty, ret-ty):
+                                  return(arrowType(new-binds.map(fun(bnd): bnd.b end), ret-ty, moreRecord([])))
+                                else:
+                                  add-error(l,
+                                    msg(errFunctionAnnIncompatibleReturn,
+                                      [fmty(body-ty), fmty(ret-ty)]))^seq(
+                                    return(dynType))
+                                end
+                              end)
+                            )
+                        end)
+                    end)
+                | s_method(l, args, ann, doc, body, ck) => return(dynType)
+                | s_extend(l, super, fields) =>
+                  tc(super)^bind(fun(base):
+                      for foldm(ty from base, fld from fields):
+                        tc-member(fld)^bind(fun(mty):
+                            cases(Option) mty:
+                              | none => return(ty)
+                              | some(fldty) =>
+                                return(type-record-add(ty, fldty.a, fldty.b))
+                            end
+                          end)
                       end
                     end)
-                end
-              end)
-          | s_update(l, super, fields) => return(dynType)
-          | s_obj(l, fields) =>
-            (for foldm(acc from normalRecord([]), f from fields):
-                tc-member(f)^bind(fun(mty):
-                    cases(option.Option) mty:
-                      | none =>
-                        return(moreRecord(acc.fields))
-                        # NOTE(dbp 2013-10-16): This is a little bit of a hack -
-                        # to reuse the helper that wants to operate on types.
-                      | some(fty) =>
-                        return(type-record-add(baseType(topTag,acc), fty.a, fty.b).record)
-                    end
-                  end)
-              end)^bind(fun(record):
-                return(baseType(botTag, record))
-              end)
-          | s_app(l, fn, args) =>
-            tc(fn)^bind(fun(fn-ty):
-                cases(Type) fn-ty:
-                  | arrowType(arg-types, ret-type, rec-type) =>
-                    if args.length() <> arg-types.length():
-                      add-error(l,
-                        msg(errArityMismatch, [arg-types.length(), args.length()]))^seq(
-                        return(dynType))
-                    else:
-                      sequence(args.map(tc))^bind(fun(arg-vals):
-                          var counter = 1
-                          var arg-error = false
-                          sequence(
-                            for map2(at from arg-types, av from arg-vals):
-                              if not subtype(av, at):
-                                arg-error := true
-                                add-error(l,
-                                  msg(errArgumentBadType, [counter, fmty(at), fmty(av)]))
-                              else:
-                                return(nothing)
-                              end
-                            end)^seq(return(if arg-error: dynType else: ret-type end))
+                | s_update(l, super, fields) => return(dynType)
+                | s_obj(l, fields) =>
+                  (for foldm(acc from normalRecord([]), f from fields):
+                      tc-member(f)^bind(fun(mty):
+                          cases(option.Option) mty:
+                            | none =>
+                              return(moreRecord(acc.fields))
+                              # NOTE(dbp 2013-10-16): This is a little bit of a hack -
+                              # to reuse the helper that wants to operate on types.
+                            | some(fty) =>
+                              return(type-record-add(baseType(topTag,acc), fty.a, fty.b).record)
+                          end
                         end)
-                    end
-                    # NOTE(dbp 2013-10-16): Not really anything we can do. Odd, but...
-                  | dynType => return(dynType)
-                  | else =>
-                    add-error(l, msg(errApplyNonFunction, [fmty(fn-ty)]))^seq(return(dynType))
-                end
-              end)
-          | s_id(l, id) =>
-            get-env()^bind(fun(env):
-                cases(option.Option) map-get(env, id):
-                  | none => add-error(l, msg(errUnboundIdentifier, [id]))^seq(return(dynType))
-                  | some(ty) => return(ty)
-                end
-              end)
-          | s_num(l, num) => return(nmty("Number"))
-          | s_bool(l, bool) => return(nmty("Bool"))
-          | s_str(l, str) => return(nmty("String"))
-          | s_get_bang(l, obj, str) => return(dynType)
-          | s_bracket(l, obj, field) =>
-            cases(A.Expr) field:
-              | s_str(l1, s) =>
-                tc(obj)^bind(fun(obj-ty):
-                    cases(Type) obj-ty:
-                      | dynType => return(dynType)
-                      | else =>
-                        cases(RecordType) obj-ty.record:
-                          | normalRecord(fields) =>
-                            cases(Option) map-get(fields, s):
-                              | none => add-error(l, msg(errFieldNotFound, [s]))^seq(return(dynType))
-                              | some(ty) => return(ty)
-                            end
-                          | moreRecord(fields) =>
-                            cases(Option) map-get(fields, s):
-                              | none => return(dynType)
-                              | some(ty) => return(ty)
-                            end
-                        end
-                    end
-                  end)
-              | else =>
-                # NOTE(dbp 2013-10-21): Actually type check field to see if
-                # it is a String or Dyn
-                return(dynType)
-            end
-          | s_colon_bracket(l, obj, field) => return(dynType)
-          | s_datatype(l, name, params, variants, check) =>
-            # NOTE(dbp 2013-10-30): Should statements have type nothing?
-            return(nmty("Nothing"))
-          | s_cases(l, _type, val, branches) =>
-            get-type(_type)^bind(
-              fun(type):
-                tc(val)^bind(
-                  fun(val-ty):
-                    if not subtype(type, val-ty):
-                      add-error(l,
-                        msg(errCasesValueBadType, [fmty(type), fmty(val-ty)])
-                        )^seq(return(dynType))
-                    else:
-                      get-env()^bind(
-                        fun(env):
-                          var branches-ty = dynType
-                          sequence(branches.map(fun(branch):
-                                # TODO(dbp 2013-10-30): Need to have a data-env, so we can
-                                # pick up non-bound constructors.
-                                cases(Option) map-get(env, branch.name):
-                                  | none => add-error(branch.l,
-                                      msg(errCasesBranchInvalidVariant, [fmty(type), branch.name])
-                                      )
-                                  | some(ty) =>
-                                    cases(Type) ty:
-                                      | arrowType(args, ret, rec) =>
-                                        # NOTE(dbp 2013-10-30): No subtyping - cases type
-                                        # must match constructors exactly.
-                                        if ret <> type:
-                                          add-error(branch.l,
-                                            msg(errCasesBranchInvalidVariant, [fmty(type), branch.name])
-                                            )
-                                        else if args.length() <> branch.args.length():
-                                          add-error(branch.l,
-                                            msg(errCasesPatternNumberFields,
-                                              [branch.name, args.length(), branch.args.length()])
-                                            )
-                                        else:
-                                          # NOTE(dbp 2013-10-30): We want to check that
-                                          # branches have the same type.  This is slightly
-                                          # tricky, so we'll opt for a temporary but dynless solution -
-                                          # set it to the first branches type, and make
-                                          # sure all the rest are equal.
-                                          add-bindings(for map2(bnd from branch.args,
-                                                argty from args):
-                                              pair(bnd.id, argty)
-                                            end,
-                                            tc(branch.body)^bind(fun(branchty):
-                                                if branches-ty == dynType: # in first branch
-                                                  branches-ty := branchty
-                                                  return(branchty)
-                                                else:
-                                                  if branchty == branches-ty:
-                                                    return(branchty)
-                                                  else:
-                                                    add-error(branch.l,
-                                                      msg(errCasesBranchType, [branch.name])
-                                                      )^seq(return(branches-ty))
-                                                  end
-                                                end
-                                              end))
-                                        end
-                                      | baseType(_,_) =>
-                                        if ty <> type:
-                                          add-error(branch.l,
-                                            msg(errCasesBranchInvalidVariant, [fmty(type), branch.name])
-                                            )^seq(return(dynType))
-                                        else:
-                                          tc(branch.body)^bind(fun(branchty):
-                                              if branches-ty == dynType:
-                                                branches-ty := branchty
-                                                return(branchty)
-                                              else:
-                                                if branchty == branches-ty:
-                                                  return(branchty)
-                                                else:
-                                                  add-error(branch.l,
-                                                    msg(errCasesBranchType, [branch.name])
-                                                    )^seq(return(branches-ty))
-                                                end
-                                              end
-                                            end)
-                                        end
-                                      | else =>
-                                        add-error(branch.l,
-                                          msg(errCasesBranchInvalidVariant, [fmty(type), branch.name])
-                                          )^seq(dynType)
+                    end)^bind(fun(record):
+                      return(baseType(botTag, record))
+                    end)
+                | s_app(l, fn, args) =>
+                  tc(fn)^bind(fun(fn-ty):
+                      cases(Type) fn-ty:
+                        | arrowType(arg-types, ret-type, rec-type) =>
+                          if args.length() <> arg-types.length():
+                            add-error(l,
+                              msg(errArityMismatch, [arg-types.length(), args.length()]))^seq(
+                              return(dynType))
+                          else:
+                            sequence(args.map(tc))^bind(fun(arg-vals):
+                                var counter = 1
+                                var arg-error = false
+                                sequence(
+                                  for map2(at from arg-types, av from arg-vals):
+                                    if not subtype(av, at):
+                                      arg-error := true
+                                      add-error(l,
+                                        msg(errArgumentBadType, [counter, fmty(at), fmty(av)]))
+                                    else:
+                                      return(nothing)
                                     end
-                                end
-                              end))^seq(return(branches-ty))
+                                  end)^seq(return(if arg-error: dynType else: ret-type end))
+                              end)
+                          end
+                          # NOTE(dbp 2013-10-16): Not really anything we can do. Odd, but...
+                        | dynType => return(dynType)
+                        | else =>
+                          add-error(l, msg(errApplyNonFunction, [fmty(fn-ty)]))^seq(return(dynType))
+                      end
+                    end)
+                | s_id(l, id) =>
+                  get-env()^bind(fun(env):
+                      cases(option.Option) map-get(env, id):
+                        | none => add-error(l, msg(errUnboundIdentifier, [id]))^seq(return(dynType))
+                        | some(ty) => return(ty)
+                      end
+                    end)
+                | s_num(l, num) => return(nmty("Number"))
+                | s_bool(l, bool) => return(nmty("Bool"))
+                | s_str(l, str) => return(nmty("String"))
+                | s_get_bang(l, obj, str) => return(dynType)
+                | s_bracket(l, obj, field) =>
+                  cases(A.Expr) field:
+                    | s_str(l1, s) =>
+                      tc(obj)^bind(fun(obj-ty):
+                          cases(Type) obj-ty:
+                            | dynType => return(dynType)
+                            | else =>
+                              cases(RecordType) obj-ty.record:
+                                | normalRecord(fields) =>
+                                  cases(Option) map-get(fields, s):
+                                    | none => add-error(l, msg(errFieldNotFound, [s]))^seq(return(dynType))
+                                    | some(ty) => return(ty)
+                                  end
+                                | moreRecord(fields) =>
+                                  cases(Option) map-get(fields, s):
+                                    | none => return(dynType)
+                                    | some(ty) => return(ty)
+                                  end
+                              end
+                          end
                         end)
-                    end
-                  end)
-              end)
-          | else => raise("tc: no case matched for: " + torepr(ast))
-        end
-        )
+                    | else =>
+                      # NOTE(dbp 2013-10-21): Actually type check field to see if
+                      # it is a String or Dyn
+                      return(dynType)
+                  end
+                | s_colon_bracket(l, obj, field) => return(dynType)
+                | s_datatype(l, name, params, variants, check) =>
+                  # NOTE(dbp 2013-10-30): Should statements have type nothing?
+                  return(nmty("Nothing"))
+                | s_cases(l, _type, val, branches) =>
+                  get-type(_type)^bind(
+                    fun(type):
+                      tc(val)^bind(
+                        fun(val-ty):
+                          if not subtype(type, val-ty):
+                            add-error(l,
+                              msg(errCasesValueBadType, [fmty(type), fmty(val-ty)])
+                              )^seq(return(dynType))
+                          else:
+                            get-env()^bind(
+                              fun(env):
+                                var branches-ty = dynType
+                                sequence(branches.map(fun(branch):
+                                      # TODO(dbp 2013-10-30): Need to have a data-env, so we can
+                                      # pick up non-bound constructors.
+                                      cases(Option) map-get(env, branch.name):
+                                        | none => add-error(branch.l,
+                                            msg(errCasesBranchInvalidVariant, [fmty(type), branch.name])
+                                            )
+                                        | some(ty) =>
+                                          cases(Type) ty:
+                                            | arrowType(args, ret, rec) =>
+                                              # NOTE(dbp 2013-10-30): No subtyping - cases type
+                                              # must match constructors exactly.
+                                              if ret <> type:
+                                                add-error(branch.l,
+                                                  msg(errCasesBranchInvalidVariant, [fmty(type), branch.name])
+                                                  )
+                                              else if args.length() <> branch.args.length():
+                                                add-error(branch.l,
+                                                  msg(errCasesPatternNumberFields,
+                                                    [branch.name, args.length(), branch.args.length()])
+                                                  )
+                                              else:
+                                                # NOTE(dbp 2013-10-30): We want to check that
+                                                # branches have the same type.  This is slightly
+                                                # tricky, so we'll opt for a temporary but dynless solution -
+                                                # set it to the first branches type, and make
+                                                # sure all the rest are equal.
+                                                add-bindings(for map2(bnd from branch.args,
+                                                      argty from args):
+                                                    pair(bnd.id, argty)
+                                                  end,
+                                                  tc(branch.body)^bind(fun(branchty):
+                                                      if branches-ty == dynType: # in first branch
+                                                        branches-ty := branchty
+                                                        return(branchty)
+                                                      else:
+                                                        if branchty == branches-ty:
+                                                          return(branchty)
+                                                        else:
+                                                          add-error(branch.l,
+                                                            msg(errCasesBranchType, [branch.name])
+                                                            )^seq(return(branches-ty))
+                                                        end
+                                                      end
+                                                    end))
+                                              end
+                                            | baseType(_,_) =>
+                                              if ty <> type:
+                                                add-error(branch.l,
+                                                  msg(errCasesBranchInvalidVariant, [fmty(type), branch.name])
+                                                  )^seq(return(dynType))
+                                              else:
+                                                tc(branch.body)^bind(fun(branchty):
+                                                    if branches-ty == dynType:
+                                                      branches-ty := branchty
+                                                      return(branchty)
+                                                    else:
+                                                      if branchty == branches-ty:
+                                                        return(branchty)
+                                                      else:
+                                                        add-error(branch.l,
+                                                          msg(errCasesBranchType, [branch.name])
+                                                          )^seq(return(branches-ty))
+                                                      end
+                                                    end
+                                                  end)
+                                              end
+                                            | else =>
+                                              add-error(branch.l,
+                                                msg(errCasesBranchInvalidVariant, [fmty(type), branch.name])
+                                                )^seq(dynType)
+                                          end
+                                      end
+                                    end))^seq(return(branches-ty))
+                              end)
+                          end
+                        end)
+                    end)
+                | else => raise("tc: no case matched for: " + torepr(ast))
+              end
+              )
+          end
+          )
+      )
     end
     )
 end
