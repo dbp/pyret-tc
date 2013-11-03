@@ -50,6 +50,7 @@ data Type:
   | dynType
   | baseType(tag :: TagType, record :: RecordType)
   | arrowType(args :: List<Type>, ret :: Type, record :: RecordType)
+  | methodType(self :: Type, args :: List<Type>, ret :: Type, record :: RecordType)
 sharing:
   _equals(self, other):
     cases(Type) self:
@@ -58,6 +59,10 @@ sharing:
         is-baseType(other) and (tag == other.tag) and (record == other.record)
       | arrowType(args, ret, record) =>
         is-arrowType(other) and (args == other.args)
+        and (ret == other.ret) and (record == other.record)
+      | methodType(mself, args, ret, record) =>
+        is-methodType(other) and (mself == other.self)
+        and (args == other.args)
         and (ret == other.ret) and (record == other.record)
     end
   end
@@ -398,6 +403,7 @@ fun type-record-add(orig :: Type, field :: String, type :: Type) -> Type:
       # NOTE(dbp 2013-10-16): Can we start treating this as something
       # better? moreRecord or something?
     | dynType => dynType
+    | else => raise("type-record-add: didn't match " + torepr(orig))
   end
 where:
   my-type = baseType(topTag, normalRecord([]))
@@ -614,7 +620,7 @@ end
 
 
 ################################################################################
-# Subtyping (mostly record-based.)                                             #
+# Subtyping.                                                                   #
 ################################################################################
 
 fun subtype(child :: Type, parent :: Type) -> Bool:
@@ -652,10 +658,22 @@ fun subtype(child :: Type, parent :: Type) -> Bool:
       cases(Type) child:
         | dynType => true
         | arrowType(childargs, childret, childrecord) =>
-          for fold2(wt from subtype(childret, parentret),
+          for fold2(wt from (childargs.length() == parentargs.length()) and subtype(parentret, childret),
                     ct from childargs,
                     pt from parentargs):
-            wt and subtype(pt, ct)
+            wt and subtype(ct, pt)
+          end
+        | else => false
+      end
+    | methodType(parentself, parentargs, parentret, parentrecord) =>
+      cases(Type) child:
+        | dynType => true
+        | methodType(childself, childargs, childret, childrecord) =>
+          for fold2(wt from (childargs.length() == parentargs.length())
+                            and subtype(parentret, childret) and subtype(childself, parentself),
+              ct from childargs,
+              pt from parentargs):
+            wt and subtype(ct, pt)
           end
         | else => false
       end
@@ -664,7 +682,8 @@ fun subtype(child :: Type, parent :: Type) -> Bool:
         | dynType => true
         | baseType(childtags, childrecord) =>
           tag-subtype(childtags, parenttags) and
-          record-subtype(childrecord, parentrecord)
+              record-subtype(childrecord, parentrecord)
+        | else => false
       end
   end
 where:
@@ -683,6 +702,26 @@ where:
   subtype(recType([]), recType([pair("foo", numType)])) is false
   subtype(recType([pair("foo", numType), pair("bar", topType)]),
     recType([pair("foo", topType)])) is true
+
+  subtype(arrowType([], dynType, moreRecord([])), arrowType([dynType], dynType, moreRecord([]))) is false
+  subtype(arrowType([numType], dynType, moreRecord([])), arrowType([topType], dynType, moreRecord([]))) is true
+  subtype(arrowType([topType], dynType, moreRecord([])), arrowType([numType], dynType, moreRecord([]))) is false
+  subtype(arrowType([topType], dynType, moreRecord([])), arrowType([topType], dynType, moreRecord([]))) is true
+  subtype(arrowType([topType], topType, moreRecord([])), arrowType([topType], numType, moreRecord([]))) is true
+  subtype(arrowType([topType], numType, moreRecord([])), arrowType([topType], topType, moreRecord([]))) is false
+
+  subtype(methodType(dynType, [], dynType, moreRecord([])),
+    methodType(dynType, [dynType], dynType, moreRecord([]))) is false
+  subtype(methodType(numType, [topType], dynType, moreRecord([])),
+    methodType(topType, [topType], dynType, moreRecord([]))) is true
+  subtype(methodType(numType, [topType], dynType, moreRecord([])),
+    methodType(numType, [numType], dynType, moreRecord([]))) is false
+  subtype(methodType(topType, [topType], dynType, moreRecord([])),
+    methodType(topType, [topType], dynType, moreRecord([]))) is true
+  subtype(methodType(numType, [topType], topType, moreRecord([])),
+    methodType(topType, [topType], numType, moreRecord([]))) is true
+  subtype(methodType(numType, [topType], numType, moreRecord([])),
+    methodType(topType, [topType], topType, moreRecord([]))) is false
 end
 
 
@@ -701,14 +740,21 @@ default-type-env = [
 
 fun tc-file(p, s):
   top-type = baseType(topTag, moreRecord([]))
+  list-type = baseType(baseTag("List"), moreRecord([
+        pair("length", methodType(dynType, [], nmty("Number"), moreRecord([])))
+      ]))
   env = [
     pair("Any", top-type),
     pair("list", baseType(botTag,
-        moreRecord([pair("map", top-type)]))),
+        moreRecord([
+            pair("map", top-type),
+            pair("link", arrowType([top-type, list-type], list-type, moreRecord([]))),
+            pair("empty", list-type)
+          ]))),
     pair("builtins", baseType(botTag,
         moreRecord([]))),
-    pair("link", arrowType([dynType, dynType], nmty("List"), moreRecord([]))),
-    pair("empty", nmty("List"))
+    pair("link", arrowType([dynType, dynType], list-type, moreRecord([]))),
+    pair("empty", list-type)
   ]
   stx = s^A.parse(p, { ["check"]: false})
   iifs = eval(is-inferred-functions(stx.pre-desugar.block), [], [], env, default-type-env)
@@ -918,6 +964,14 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                 | s_str(l, str) => return(nmty("String"))
                 | s_get_bang(l, obj, str) => return(dynType)
                 | s_bracket(l, obj, field) =>
+                  # NOTE(dbp 2013-11-03): We aren't actually checking methods, just applying them.
+                  fun method-apply(ty):
+                    cases(Type) ty:
+                      | methodType(self, args, ret, rec) =>
+                        arrowType(args, ret, rec)
+                      | else => ty
+                    end
+                  end
                   cases(A.Expr) field:
                     | s_str(l1, s) =>
                       tc(obj)^bind(fun(obj-ty):
@@ -928,12 +982,12 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                                 | normalRecord(fields) =>
                                   cases(Option) map-get(fields, s):
                                     | none => add-error(l, msg(errFieldNotFound, [s]))^seq(return(dynType))
-                                    | some(ty) => return(ty)
+                                    | some(ty) => return(method-apply(ty))
                                   end
                                 | moreRecord(fields) =>
                                   cases(Option) map-get(fields, s):
                                     | none => return(dynType)
-                                    | some(ty) => return(ty)
+                                    | some(ty) => return(method-apply(ty))
                                   end
                               end
                           end
