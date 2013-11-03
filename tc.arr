@@ -357,6 +357,64 @@ fun nmty(name :: String) -> Type:
   baseType(baseTag(name), moreRecord([]))
 end
 
+fun tyequal(t1 :: Type, t2 :: Type) -> Bool:
+  doc: "Type equality, allowing for moreRecords containing unknown additional fields."
+  fun recequal(r1 :: RecordType, r2 :: RecordType) -> Bool:
+    doc: "Everything mentioned in a moreRecord must be in the normalRecord."
+    cases(RecordType) r1:
+      | normalRecord(fields1) =>
+        cases(RecordType) r2:
+          | normalRecord(fields2) => fields1 == fields2
+          | moreRecord(fields2) =>
+            for fold(base from true, field from fields2):
+              base and fields1.member(field)
+            end
+        end
+      | moreRecord(fields1) =>
+        cases(RecordType) r2:
+          | normalRecord(fields2) =>
+            for fold(base from true, field from fields1):
+              base and fields2.member(field)
+            end
+          | moreRecord(_) => true
+        end
+    end
+  end
+  cases(Type) t1:
+    | baseType(tag1, rec1) =>
+      cases(Type) t2:
+        | baseType(tag2, rec2) =>
+          (tag1 == tag2) and recequal(rec1, rec2)
+        | else => false
+      end
+    | arrowType(args1, ret1, rec1) =>
+      cases(Type) t2:
+        | arrowType(args2, ret2, rec2) =>
+          (args1 == args2) and (ret1 == ret2) and recequal(rec1, rec2)
+        | else => false
+      end
+    | methodType(self1, args1, ret1, rec1) =>
+      cases(Type) t2:
+        | methodType(self2, args2, ret2, rec2) =>
+          (self1 == self2) and (args1 == args2) and (ret1 == ret2) and recequal(rec1, rec2)
+        | else => false
+      end
+    | dynType => t2 == dynType
+  end
+where:
+  tyequal(nmty("A"), nmty("A")) is true
+  tyequal(nmty("A"), nmty("B")) is false
+  tyequal(nmty("A"), baseType(baseTag("A"), moreRecord([pair("b", nmty("Number"))]))) is true
+  tyequal(baseType(baseTag("A"), normalRecord([])), baseType(baseTag("A"), moreRecord([pair("b", nmty("Number"))]))) is false
+  tyequal(baseType(baseTag("A"), normalRecord([])), baseType(baseTag("A"), normalRecord([]))) is true
+  tyequal(baseType(baseTag("A"), normalRecord([])), baseType(baseTag("A"), normalRecord([pair("b", nmty("Number"))]))) is false
+  tyequal(nmty("A"), arrowType([], nmty("A"), moreRecord([]))) is false
+  tyequal(arrowType([], nmty("A"), moreRecord([pair("b", nmty("Number"))])), arrowType([], nmty("A"), moreRecord([]))) is true
+  tyequal(arrowType([], nmty("A"), normalRecord([pair("b", nmty("Number"))])), arrowType([], nmty("A"), moreRecord([]))) is true
+  tyequal(arrowType([], nmty("A"), normalRecord([pair("b", nmty("Number"))])), arrowType([], nmty("A"), normalRecord([]))) is false
+  tyequal(arrowType([], nmty("A"), normalRecord([])), arrowType([], nmty("A"), moreRecord([pair("b", nmty("Number"))]))) is false
+end
+
 fun get-type(ann :: A.Ann) -> TCST<Type>:
   cases(A.Ann) ann:
     | a_blank => return(dynType)
@@ -1025,8 +1083,8 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                                           cases(Type) ty:
                                             | arrowType(args, ret, rec) =>
                                               # NOTE(dbp 2013-10-30): No subtyping - cases type
-                                              # must match constructors exactly.
-                                              if ret <> type:
+                                              # must match constructors exactly (modulo records)
+                                              if not tyequal(ret, type):
                                                 add-error(branch.l,
                                                   msg(errCasesBranchInvalidVariant, [fmty(type), branch.name])
                                                   )
@@ -1061,7 +1119,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                                                     end))
                                               end
                                             | baseType(_,_) =>
-                                              if ty <> type:
+                                              if not tyequal(ty, type):
                                                 add-error(branch.l,
                                                   msg(errCasesBranchInvalidVariant, [fmty(type), branch.name])
                                                   )^seq(return(dynType))
