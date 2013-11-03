@@ -106,9 +106,17 @@ end
 #####################################################################
 
 data TCstate:
-  | tcst(value, errors, iifs, env, type-env)
+  | tcst(
+      value,
+      errors :: List<TypeError>,
+      iifs :: List<Pair<String, Type>>,
+      env :: List<Pair<String, Type>>,
+      type-env :: List<String>
+      )
 end
-# NOTE(dbp 2013-11-02): The type we want is a parametric alias for an S -> Pair<V,S> function.
+
+# NOTE(dbp 2013-11-02): The type we want is a parametric alias for an
+# S -> Pair<V,S> function, where S is (errors, iifs, env, type-env)
 TCST = Function
 
 # First the fundamental monad functions
