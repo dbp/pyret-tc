@@ -621,6 +621,8 @@ where:
   iif-src("fun f(x): 10 where: f('foo') is true end
     fun g(): 10 where: f() is 10 end") is
   [pair("f", arrowType([nmty("String")], nmty("Bool"), baseRec))]
+  iif-src("fun f(x): add1(x) where: f('Fo') is 10 end") is
+  [pair("f", arrowType([nmty("String")], nmty("Number"), baseRec))]
 end
 
 
@@ -722,10 +724,10 @@ fun tc-file(p, s):
     pair("empty", nmty("List"))
   ]
   stx = s^A.parse(p, { ["check"]: false})
-  iifs = exec-iifs(is-inferred-functions(stx.pre-desugar.block), [], [], env, default-type-env)
-  resultty = exec-errors(tc-prog(stx.with-types), [], iifs, env, default-type-env)
+  iifs = eval(is-inferred-functions(stx.pre-desugar.block), [], [], env, default-type-env)
+  result = run(tc-prog(stx.with-types), [], iifs, env, default-type-env)
   # print(resultty.env.map(torepr).join-str("\n"))
-  resultty
+  result.errors
 end
 
 fun tc-prog(prog :: A.Program) -> TCST<Type>:
