@@ -315,12 +315,42 @@ data TCError:
 end
 
 fun msg(err :: TCError, values :: List<Any>) -> String:
-  "An error occurred during type-checking:\n\n" + tostring(err) +
-  "\n\nRelated values:\n\n" + values.map(torepr).join-str(", ")
+  tostring(err) +
+  "\n\nRelated values:\n\n" + values.map(tostring).join-str(", ") + "\n"
 end
 
 fun fmty(type :: Type) -> String:
-  torepr(type)
+  fun fmfields(fields):
+    fields.map(fun(p): p.a + " : " + fmty(p.b) end).join-str(", ")
+  end
+  fun fmarrow(args, ret):
+    "(" + args.map(fmty).join-str(", ") + " -> " + fmty(ret) + ")"
+  end
+  cases(Type) type:
+    | dynType => "Dyn*"
+    | baseType(tag, rec) =>
+      cases(TagType) tag:
+        | baseTag(nm) => nm
+        | topTag => "Any*"
+        | botTag =>
+          cases(RecordType) rec:
+            | normalRecord(fields) =>
+              "{" + fmfields(fields) + "}"
+            | moreRecord(fields) =>
+              "{" + fmfields(fields) + "...}"
+          end
+      end
+    | arrowType(args, ret, rec) => fmarrow(args, ret)
+    | methodType(self, args, ret, rec) => fmarrow([self]+args, ret)
+  end
+end
+
+fun pretty-error(ep :: Pair<Loc, String>) -> String:
+  "Line " + tostring(ep.a.line) + ", Column " + tostring(ep.a.column) + " - " + ep.b
+end
+
+fun pretty-iif(iif :: Pair<String, Type>) -> String:
+  "fun " + iif.a + " :: " + fmty(iif.b)
 end
 
 ################################################################################
@@ -426,7 +456,7 @@ end
 fun get-type(ann :: A.Ann) -> TCST<Type>:
   cases(A.Ann) ann:
     | a_blank => return(dynType)
-    | a_any => return(dynType)
+    | a_any => return(baseType(topTag, moreRecord([])))
     | a_name(l, id) =>
       get-type-env()^bind(fun(type-env):
           if set-get(type-env, id):
@@ -804,7 +834,7 @@ default-type-env = [
   "Nothing"
 ]
 
-fun tc-file(p, s):
+fun tc-main(p, s):
   top-type = baseType(topTag, moreRecord([]))
   list-type = baseType(baseTag("List"), moreRecord([
         pair("length", methodType(dynType, [], nmty("Number"), moreRecord([])))
@@ -823,10 +853,31 @@ fun tc-file(p, s):
     pair("empty", list-type)
   ]
   stx = s^A.parse(p, { ["check"]: false})
-  iifs = eval(is-inferred-functions(stx.pre-desugar.block), [], [], env, default-type-env)
-  result = run(tc-prog(stx.with-types), [], iifs, env, default-type-env)
-  # print(resultty.env.map(torepr).join-str("\n"))
-  result.errors
+  # NOTE(dbp 2013-11-03): This is sort of crummy. Need to get bindings first, for use
+  # with inferring functions, but then will do this again when we start type checking...
+  bindings = eval(get-bindings(stx.with-types.block), [], [], env, default-type-env)
+  iifs = eval(is-inferred-functions(stx.pre-desugar.block), [], [], bindings + env, default-type-env)
+  run(tc-prog(stx.with-types), [], iifs, env, default-type-env)
+end
+
+fun tc-file(p, s):
+  tc-main(p,s).errors
+end
+
+fun tc-report(p, s):
+  print("Report for " + p + ":\n\n")
+  result = tc-main(p,s)
+  if result.errors.length() <> 0:
+    print("Errors detected:\n")
+    print(result.errors.map(pretty-error).join-str("\n"))
+  else:
+    print("No type errors detected.")
+  end
+  when result.iifs.length() <> 0:
+    print("\n\nTop level inferred functions:\n")
+    print(result.iifs.map(pretty-iif).join-str("\n"))
+  end
+  print("\n")
 end
 
 fun tc-prog(prog :: A.Program) -> TCST<Type>:
@@ -1197,7 +1248,7 @@ end
 
 var files = []
 baseR = Racket("racket/base")
-cmdlineargs = baseR("current-command-line-arguments")
+cmdlineargs = baseR("vector->list", baseR("current-command-line-arguments"))
 fun usage():
   print("Usage:\n
    raco pyret tc.arr tests (runs all tests)\n
@@ -1209,14 +1260,18 @@ fun format-errors(ers):
     | link(_,_) => ers.map(torepr).join-str("\n")
   end
 end
-cmdlinelen = baseR("vector-length",cmdlineargs)
-if cmdlinelen == 0:
+if cmdlineargs.length() == 1:
   usage()
 else:
-  mode = baseR("vector-ref", cmdlineargs, cmdlinelen - 1)
+  mode = cmdlineargs.get(1)
   if mode == "tests":
     files := D.dir("tests").list().map(fun(path): build-path(["tests", path]) end)
-  else if baseR("file-exists?", mode) and (not str-ends-with(mode, "tc.arr")):
+  # NOTE(dbp 2013-11-03): Really need a commandline parsing library...
+  else if (mode == "report") or
+    ((cmdlineargs.get(0) == "--no-checks") and (cmdlineargs.get(2) == "report")):
+    path = cmdlineargs.get(if mode == "report": 2 else: 3 end)
+    tc-report(path, F.input-file(path).read-file())
+  else if baseR("file-exists?", mode):
     files := [mode]
   else:
     usage()
