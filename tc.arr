@@ -1028,9 +1028,33 @@ default-type-env = [
             pair("tostring", simple-mty("String", [], "String")),
             pair("_torepr", simple-mty("String", [], "String"))
           ])))),
-  pair("List", typeNominal(anonType(moreRecord([
-      pair("length", methodType([],dynType, [], nmty("Number"), moreRecord([])))
-    ])))),
+  pair("List", typeNominal(anonType(normalRecord([
+            pair("length", simple-mty("List", [], "Number")),
+            pair("each", simple-mty("List", [arrowType([], [nmty("Any")], nmty("Nothing"), moreRecord([]))], "Nothing")),
+            pair("map", simple-mty("List", [arrowType([], [nmty("Any")], dynType, moreRecord([]))], "List")),
+            pair("filter", simple-mty("List", [arrowType([], [nmty("Any")], nmty("Bool"), moreRecord([]))], "List")),
+            pair("find", simple-mty("List", [arrowType([], [nmty("Any")], nmty("Bool"), moreRecord([]))], "Option")),
+            pair("partition", simple-mty("List", [arrowType([], [nmty("Any")], nmty("Bool"), moreRecord([]))], anonType(normalRecord([pair("is-true", nmty("List")), pair("is-false", nmty("List"))])))),
+            pair("foldr", simple-mty("List", [arrowType([], [dynType, dynType], dynType, moreRecord([])), dynType], dynType)),
+            pair("foldl", simple-mty("List", [arrowType([], [dynType, dynType], dynType, moreRecord([])), dynType], dynType)),
+            pair("member",simple-mty("List", ["Any"], "Bool")),
+            pair("append", simple-mty("List", ["List"], "List")),
+            pair("last", simple-mty("List", [], dynType)),
+            pair("take", simple-mty("List", ["Number"], "List")),
+            pair("drop", simple-mty("List", ["Number"], "List")),
+            pair("reverse", simple-mty("List", [], "List")),
+            pair("get", simple-mty("List", ["Number"], dynType)),
+            pair("set", simple-mty("List", ["Number", dynType], "List")),
+            pair("_equals", simple-mty("List", ["Any"], "Bool")),
+            pair("tostring", simple-mty("List", [], "String")),
+            pair("_torepr", simple-mty("List", [], "String")),
+            pair("sort-by", simple-mty("List",
+                [arrowType([],[dynType, dynType], nmty("Bool"), moreRecord([])),
+                  arrowType([],[dynType, dynType], nmty("Bool"), moreRecord([]))], "List")),
+            pair("sort", simple-mty("List", [], "List")),
+            pair("join-str", simple-mty("List", ["String"], "List"))
+          ])))),
+  pair("Option", typeNominal(anonType(moreRecord([])))),
   pair("Nothing", typeNominal(anonType(normalRecord([]))))
 ]
 
