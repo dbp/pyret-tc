@@ -1,7 +1,7 @@
 #lang pyret
 
 fun<T> id(x :: T) -> T:
-  t
+  x
 end
 
 fun f(x :: String) -> String:

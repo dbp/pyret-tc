@@ -261,68 +261,62 @@ end
 ################################################################################
 
 data TCError:
-  | errAssignWrongType with: tostring(self):
-      "A name was defined to have a certain type,
-      but assigned a value of an incompatible type."
+  | errAssignWrongType(id, bindty, valty) with: tostring(self):
+      "The identifier " + self.id + " was defined to have type " + self.bindty + ",
+      but assigned a value of an incompatible type: " + self.valty + "."
     end
-  | errFunctionInferredIncompatibleReturn with: tostring(self):
-      "The body of the function is incompatible with the return
-      type inferred based on tests."
+  | errFunctionInferredIncompatibleReturn(bodyty, retty) with: tostring(self):
+      "The body of the function has type " + self.bodyty + ", which is incompatible with the return
+      type, " + self.retty + ", inferred based on tests."
     end
-  | errFunctionAnnIncompatibleReturn with: tostring(self):
-      "The body of the function is incompatible with the return
-      type specified in annotations"
+  | errFunctionAnnIncompatibleReturn(bodyty, retty) with: tostring(self):
+      "The body of the function has type " + self.bodyty + ", which is incompatible with the return
+      type specified in annotations as " + self.retty + "."
     end
-  | errArityMismatch with: tostring(self):
-      "Arity mismatch: function expected a different number of arguments
-      than it was given."
+  | errArityMismatch(expected, given) with: tostring(self):
+      "Arity mismatch: function expected " + tostring(self.expected) + " arguments, but was
+      passed " + tostring(self.given) + "."
     end
-  | errArgumentBadType with: tostring(self):
-      "An argument passed to the function is of the wrong type."
+  | errArgumentBadType(position, expected, given) with: tostring(self):
+      "The " + ordinalize(self.position) + " argument was expected to be of type " + self.expected + ", but was the incompatible type " + self.given + "."
     end
-  | errApplyNonFunction with: tostring(self):
-      "Applying a non-function."
+  | errApplyNonFunction(ty) with: tostring(self):
+      "Applying a non-function value of type " + self.ty + "."
     end
-  | errUnboundIdentifier with: tostring(self):
-      "Identifier is unbound."
+  | errUnboundIdentifier(id) with: tostring(self):
+      "Identifier " + self.id + " is unbound."
     end
-  | errFieldNotFound with: tostring(self):
-      "Field not found on object."
+  | errFieldNotFound(name) with: tostring(self):
+      "Field " + self.name + " not present on object."
     end
-  | errCasesValueBadType with: tostring(self):
-      "Value in cases expression is not of the right type."
+  | errCasesValueBadType(expected, given) with: tostring(self):
+      "The value in cases expression should have type " + self.expected + ", but has incompatible type " + self.given + "."
     end
-  | errCasesBranchInvalidVariant with: tostring(self):
-      "A branch in the cases expression is
-      not a valid variant of the data type."
+  | errCasesBranchInvalidVariant(type, name) with: tostring(self):
+      "The branch " + self.name + " in the cases expression is
+      not a valid variant of the data type " + self.type + "."
     end
-  | errCasesPatternNumberFields with: tostring(self):
-      "A variant pattern for a cases branch does not
-      have the right number of fields."
+  | errCasesPatternNumberFields(name, expected, given) with: tostring(self):
+      "The variant pattern for cases branch " + self.name + " should have " + tostring(self.expected) + " fields, not " + tostring(self.given)  + "."
     end
-  | errCasesBranchType with: tostring(self):
+  | errCasesBranchType(type1, type2, name) with: tostring(self):
       "All branches of a cases expression must evaluate
-      to the same type."
+      to the same type. Found branches with type " + self.type1 +", which is incompatible with the type of branch " + self.name + ", which has type " + self.type2 + "."
     end
-  | errTypeNotDefined with: tostring(self):
-      "A type was used that is not defined. Did you forget to
+  | errTypeNotDefined(type) with: tostring(self):
+      "The " + self.type + " type is not defined. Did you forget to
       import, or forget to add the type parameter?"
     end
-  | errUnknownTypeParameter with: tostring(self):
-      "The return type was a type parameter that did not
-      appear in the argument list."
+  | errIfTestNotBool(ty) with: tostring(self):
+      "The branch of the if expression has type " + self.ty + ", which is not a Bool."
     end
-  | errIfTestNotBool with: tostring(self):
-      "A branch of the if has a test that is not a Bool"
-    end
-  | errIfBranchType with: tostring(self):
-      "All branches of an if expression must evaluate to the same type."
+  | errIfBranchType(type1, type2) with: tostring(self):
+      "All branches of an if expression must evaluate to the same type. Found branches with type " + self.type1 + " which is incompatible with this branch, which has type " + self.type2 + "."
     end
 end
 
-fun msg(err :: TCError, values :: List<Any>) -> String:
-  tostring(err) +
-  "\n\nRelated values:\n\n" + values.map(tostring).join-str(", ") + "\n"
+fun msg(err :: TCError) -> String:
+  tostring(err)
 end
 
 fun fmty(type :: Type) -> String:
@@ -389,6 +383,30 @@ where:
   concat([[],[],[1]]) is [1]
 end
 
+fun ordinalize(n :: Number) -> String:
+  if (n > 10) and (n < 21):
+    tostring(n) + "th"
+  else:
+    m = n.modulo(10)
+    if m == 1:
+      tostring(n) + "st"
+    else if m == 2:
+      tostring(n) + "nd"
+    else if m == 3:
+      tostring(n) + "rd"
+    else:
+      tostring(n) + "th"
+    end
+  end
+where:
+  ordinalize(1) is "1st"
+  ordinalize(2) is "2nd"
+  ordinalize(3) is "3rd"
+  [4,5,6,7,8,9,10,11,12,13,14,20,100].map(fun(n): ordinalize(n) is tostring(n) + "th" end)
+  [21,101,131].map(fun(n): ordinalize(n) is tostring(n) + "st" end)
+  [22, 122, 10232].map(fun(n): ordinalize(n) is tostring(n) + "nd" end)
+  [23, 123, 1023].map(fun(n): ordinalize(n) is tostring(n) + "rd" end)
+end
 
 ################################################################################
 # Basic helper functions.                                                      #
@@ -469,7 +487,7 @@ fun get-type(ann :: A.Ann) -> TCST<Type>:
           cases(Option) map-get(type-env, id):
             | some(_) => return(nmty(id))
             | none =>
-              add-error(l, msg(errTypeNotDefined, [fmty(nmty(id))]))^seq(
+              add-error(l, msg(errTypeNotDefined(fmty(nmty(id)))))^seq(
                 return(dynType))
           end
         end)
@@ -801,14 +819,14 @@ fun subtype(l :: Loc, _child :: Type, _parent :: Type) -> TCST<Bool>:
                 get-type-env()^bind(fun(type-env):
                     cases(Option) map-get(type-env, parentname):
                       | none =>
-                        add-error(l, msg(errTypeNotDefined, [fmty(nmty(parentname))]))^seq(
+                        add-error(l, msg(errTypeNotDefined(fmty(nmty(parentname)))))^seq(
                           return(false))
                       | some(parentbind) =>
                         cases(TypeBinding) parentbind:
                           | typeNominal(_) =>
                             cases(Option) map-get(type-env, childname):
                               | none =>
-                                add-error(l, msg(errTypeNotDefined, [fmty(nmty(childname))]))^seq(
+                                add-error(l, msg(errTypeNotDefined(fmty(nmty(childname)))))^seq(
                                   return(false))
                               | some(childbind) =>
                                 cases(TypeBinding) childbind:
@@ -820,7 +838,7 @@ fun subtype(l :: Loc, _child :: Type, _parent :: Type) -> TCST<Bool>:
                           | typeAlias(parentty) =>
                             cases(Option) map-get(type-env, childname):
                               | none =>
-                                add-error(l, msg(errTypeNotDefined, [fmty(nmty(childname))]))^seq(
+                                add-error(l, msg(errTypeNotDefined(fmty(nmty(childname)))))^seq(
                                   return(false))
                               | some(childbind) =>
                                 cases(TypeBinding) childbind:
@@ -841,7 +859,7 @@ fun subtype(l :: Loc, _child :: Type, _parent :: Type) -> TCST<Bool>:
               get-type-env()^bind(fun(type-env):
                   cases(Option) map-get(type-env, parentname):
                     | none =>
-                      add-error(l, msg(errTypeNotDefined, [fmty(nmty(parentname))]))^seq(
+                      add-error(l, msg(errTypeNotDefined(fmty(nmty(parentname)))))^seq(
                         return(dynType))
                     | some(parentbind) =>
                       cases(TypeBinding) parentbind:
@@ -866,7 +884,7 @@ fun subtype(l :: Loc, _child :: Type, _parent :: Type) -> TCST<Bool>:
               get-type-env()^bind(fun(type-env):
                   cases(Option) map-get(type-env, childname):
                     | none =>
-                      add-error(l, msg(errTypeNotDefined, [fmty(nmty(childname))]))^seq(
+                      add-error(l, msg(errTypeNotDefined(fmty(nmty(childname)))))^seq(
                         return(dynType))
                     | some(childbind) =>
                       cases(TypeBinding) childbind:
@@ -1094,8 +1112,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                               tc(val)^bind(fun(ty):
                                   subtype(l, ty, bindty)^bind(fun(st):
                                       if not st:
-                                        add-error(l, msg(errAssignWrongType,
-                                            [name.id, fmty(bindty), fmty(ty)]))^seq(
+                                        add-error(l, msg(errAssignWrongType(name.id, fmty(bindty), fmty(ty))))^seq(
                                           return(dynType))
                                       else:
                                         return(ty)
@@ -1133,11 +1150,9 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                                                     else:
                                                       add-error(l,
                                                         if inferred:
-                                                          msg(errFunctionInferredIncompatibleReturn,
-                                                            [fmty(body-ty), fmty(ret-ty)])
+                                                          msg(errFunctionInferredIncompatibleReturn(fmty(body-ty), fmty(ret-ty)))
                                                         else:
-                                                          msg(errFunctionAnnIncompatibleReturn,
-                                                            [fmty(body-ty), fmty(ret-ty)])
+                                                          msg(errFunctionAnnIncompatibleReturn(fmty(body-ty), fmty(ret-ty)))
                                                         end)^seq(return(dynType))
                                                     end
                                                   end)
@@ -1165,7 +1180,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                                 if tyequal(nmty("Bool"), ty):
                                   return(nothing)
                                 else:
-                                  add-error(branch.l, msg(errIfTestNotBool, []))
+                                  add-error(branch.l, msg(errIfTestNotBool(ty)))
                                 end
                               end)
                           end))^seq(
@@ -1179,7 +1194,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                                       return(branchty)
                                     else:
                                       add-error(branch.l,
-                                        msg(errIfBranchType, [])
+                                        msg(errIfBranchType(fmty(branches-ty), fmty(branchty)))
                                         )^seq(return(branches-ty))
                                     end
                                   end
@@ -1198,8 +1213,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                                         return(arrowType(ps, new-binds.map(fun(bnd): bnd.b end), ret-ty, moreRecord([])))
                                       else:
                                         add-error(l,
-                                          msg(errFunctionAnnIncompatibleReturn,
-                                            [fmty(body-ty), fmty(ret-ty)]))^seq(
+                                          msg(errFunctionAnnIncompatibleReturn(fmty(body-ty), fmty(ret-ty))))^seq(
                                           return(dynType))
                                       end
                                     end)
@@ -1243,7 +1257,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                         | arrowType(params, arg-types, ret-type, rec-type) =>
                           if args.length() <> arg-types.length():
                             add-error(l,
-                              msg(errArityMismatch, [arg-types.length(), args.length()]))^seq(
+                              msg(errArityMismatch(arg-types.length(), args.length())))^seq(
                               return(dynType))
                           else:
                             sequence(args.map(tc))^bind(fun(arg-vals):
@@ -1262,7 +1276,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                                           if not tyequal(exist, av):
                                             arg-error := true
                                             add-error(l,
-                                              msg(errArgumentBadType, [counter, fmty(at), fmty(av)]))
+                                              msg(errArgumentBadType(counter, fmty(at), fmty(av))))
                                           else:
                                             return(nothing)
                                           end
@@ -1272,7 +1286,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                                           if not res:
                                             arg-error := true
                                             add-error(l,
-                                              msg(errArgumentBadType, [counter, fmty(at), fmty(av)]))
+                                              msg(errArgumentBadType(counter, fmty(at), fmty(av))))
                                           else:
                                             return(nothing)
                                           end
@@ -1284,9 +1298,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                                   else if is-nameType(ret-type) and params.member(ret-type.name):
                                     cases(Option) map-get(param-inst, ret-type):
                                       | nothing =>
-                                        # NOTE(dbp 2013-11-04): I don't actually think there is a way for this to happen...
-                                        add-error(l,
-                                          msg(errUnknownTypeParameter, [fmty(ret-type)])).seq(return(dynType))
+                                        raise("tc: type checked a body to return a type parameter not present in the arguments, which shouldn't be possible.")
                                       | some(t) => return(t)
                                     end
                                   else:
@@ -1298,13 +1310,13 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                           # NOTE(dbp 2013-10-16): Not really anything we can do. Odd, but...
                         | dynType => return(dynType)
                         | else =>
-                          add-error(l, msg(errApplyNonFunction, [fmty(fn-ty)]))^seq(return(dynType))
+                          add-error(l, msg(errApplyNonFunction(fmty(fn-ty))))^seq(return(dynType))
                       end
                     end)
                 | s_id(l, id) =>
                   get-env()^bind(fun(env):
                       cases(option.Option) map-get(env, id):
-                        | none => add-error(l, msg(errUnboundIdentifier, [id]))^seq(return(dynType))
+                        | none => add-error(l, msg(errUnboundIdentifier(id)))^seq(return(dynType))
                         | some(ty) => return(ty)
                       end
                     end)
@@ -1327,7 +1339,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                         cases(RecordType) record:
                           | normalRecord(fields) =>
                             cases(Option) map-get(fields, s):
-                              | none => add-error(l, msg(errFieldNotFound, [s]))^seq(return(dynType))
+                              | none => add-error(l, msg(errFieldNotFound(s)))^seq(return(dynType))
                               | some(ty) => return(method-apply(ty))
                             end
                           | moreRecord(fields) =>
@@ -1340,7 +1352,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                       fun record-name-lookup(name):
                         get-type-env()^bind(fun(type-env):
                             cases(Option) map-get(type-env, name):
-                              | none => add-error(l, msg(errTypeNotDefined, [fmty(nmty(name))]))^seq(return(dynType))
+                              | none => add-error(l, msg(errTypeNotDefined(fmty(nmty(name)))))^seq(return(dynType))
                               | some(recordbind) =>
                                 cases(Type) recordbind.type:
                                   | anonType(record) => record-lookup(record)
@@ -1377,7 +1389,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                           subtype(l, type, val-ty)^bind(fun(st):
                               if not st:
                                 add-error(l,
-                                  msg(errCasesValueBadType, [fmty(type), fmty(val-ty)])
+                                  msg(errCasesValueBadType(fmty(type), fmty(val-ty)))
                                   )^seq(return(dynType))
                               else:
                                 get-env()^bind(
@@ -1388,7 +1400,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                                           # pick up non-bound constructors.
                                           cases(Option) map-get(env, branch.name):
                                             | none => add-error(branch.l,
-                                                msg(errCasesBranchInvalidVariant, [fmty(type), branch.name])
+                                                msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
                                                 )
                                             | some(ty) =>
                                               cases(Type) ty:
@@ -1397,12 +1409,11 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                                                   # must match constructors exactly (modulo records)
                                                   if not tyequal(ret, type):
                                                     add-error(branch.l,
-                                                      msg(errCasesBranchInvalidVariant, [fmty(type), branch.name])
+                                                      msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
                                                       )
                                                   else if args.length() <> branch.args.length():
                                                     add-error(branch.l,
-                                                      msg(errCasesPatternNumberFields,
-                                                        [branch.name, args.length(), branch.args.length()])
+                                                      msg(errCasesPatternNumberFields(branch.name, args.length(), branch.args.length()))
                                                       )
                                                   else:
                                                     # NOTE(dbp 2013-10-30): We want to check that
@@ -1423,7 +1434,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                                                               return(branchty)
                                                             else:
                                                               add-error(branch.l,
-                                                                msg(errCasesBranchType, [branch.name])
+                                                                msg(errCasesBranchType(fmty(branches-ty), fmty(branchty), branch.name))
                                                                 )^seq(return(branches-ty))
                                                             end
                                                           end
@@ -1432,7 +1443,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                                                 | nameType(_) =>
                                                   if not tyequal(ty, type):
                                                     add-error(branch.l,
-                                                      msg(errCasesBranchInvalidVariant, [fmty(type), branch.name])
+                                                      msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
                                                       )^seq(return(dynType))
                                                   else:
                                                     tc(branch.body)^bind(fun(branchty):
@@ -1444,7 +1455,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                                                             return(branchty)
                                                           else:
                                                             add-error(branch.l,
-                                                              msg(errCasesBranchType, [branch.name])
+                                                              msg(errCasesBranchType(fmty(branches-ty), fmty(branchty), branch.name))
                                                               )^seq(return(branches-ty))
                                                           end
                                                         end
@@ -1452,7 +1463,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                                                   end
                                                 | else =>
                                                   add-error(branch.l,
-                                                    msg(errCasesBranchInvalidVariant, [fmty(type), branch.name])
+                                                    msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
                                                     )^seq(dynType)
                                               end
                                           end
