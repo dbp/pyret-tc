@@ -1,0 +1,3 @@
+#lang pyret
+
+nothing.foo

@@ -849,6 +849,7 @@ fun tc-main(p, s):
   list-type = baseType(baseTag("List"), moreRecord([
         pair("length", methodType([],dynType, [], nmty("Number"), moreRecord([])))
       ]))
+  nothing-type = baseType(baseTag("Nothing"), normalRecord([]))
   env = [
     pair("Any", top-type),
     pair("list", baseType(botTag,
@@ -860,7 +861,9 @@ fun tc-main(p, s):
     pair("builtins", baseType(botTag,
         moreRecord([]))),
     pair("link", arrowType([],[dynType, dynType], list-type, moreRecord([]))),
-    pair("empty", list-type)
+    pair("empty", list-type),
+    pair("nothing", nothing-type),
+    pair("print", arrowType([], [top-type], nothing-type, moreRecord([])))
   ]
   stx = s^A.parse(p, { ["check"]: false})
   # NOTE(dbp 2013-11-03): This is sort of crummy. Need to get bindings first, for use
