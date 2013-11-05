@@ -48,15 +48,20 @@ end
 
 data Type:
   | dynType
-  | baseType(tag :: TagType, record :: RecordType)
+  | anyType
+  | nameType(name :: String)
+  | anonType(record :: RecordType)
   | arrowType(params :: List<String>, args :: List<Type>, ret :: Type, record :: RecordType)
   | methodType(params :: List<String>, self :: Type, args :: List<Type>, ret :: Type, record :: RecordType)
 sharing:
   _equals(self, other):
     cases(Type) self:
       | dynType => is-dynType(other)
-      | baseType(tag, record) =>
-        is-baseType(other) and (tag == other.tag) and (record == other.record)
+      | anyType => is-anyType(other)
+      | nameType(name) =>
+        is-nameType(other) and (name == other.name)
+      | anonType(record) =>
+        is-anonType(other) and (record == other.record)
       | arrowType(params, args, ret, record) =>
         is-arrowType(other) and (params == other.params) and (args == other.args)
         and (ret == other.ret) and (record == other.record)
@@ -64,20 +69,6 @@ sharing:
         is-methodType(other) and (params == other.params) and (mself == other.self)
         and (args == other.args)
         and (ret == other.ret) and (record == other.record)
-    end
-  end
-end
-
-data TagType:
-  | topTag
-  | botTag
-  | baseTag(name :: String)
-sharing:
-  _equals(self, other):
-    cases(TagType) self:
-      | topTag => is-topTag(other)
-      | botTag => is-botTag(other)
-      | baseTag(name) => is-baseTag(other) and (name == other.name)
     end
   end
 end
@@ -333,17 +324,13 @@ fun fmty(type :: Type) -> String:
   end
   cases(Type) type:
     | dynType => "Dyn*"
-    | baseType(tag, rec) =>
-      cases(TagType) tag:
-        | baseTag(nm) => nm
-        | topTag => "Any*"
-        | botTag =>
-          cases(RecordType) rec:
-            | normalRecord(fields) =>
-              "{" + fmfields(fields) + "}"
-            | moreRecord(fields) =>
-              "{" + fmfields(fields) + "...}"
-          end
+    | nameType(name) => name
+    | anonType(rec) =>
+      cases(RecordType) rec:
+        | normalRecord(fields) =>
+          "{" + fmfields(fields) + "}"
+        | moreRecord(fields) =>
+          "{" + fmfields(fields) + "...}"
       end
     | arrowType(params, args, ret, rec) => fmarrow(params, args, ret)
     | methodType(params, self, args, ret, rec) => fmarrow(params, [self]+args, ret)
@@ -397,7 +384,7 @@ end
 ################################################################################
 
 fun nmty(name :: String) -> Type:
-  baseType(baseTag(name), moreRecord([]))
+  nameType(name)
 end
 
 fun tyequal(t1 :: Type, t2 :: Type) -> Bool:
@@ -424,10 +411,15 @@ fun tyequal(t1 :: Type, t2 :: Type) -> Bool:
     end
   end
   cases(Type) t1:
-    | baseType(tag1, rec1) =>
+    | nameType(name1) =>
       cases(Type) t2:
-        | baseType(tag2, rec2) =>
-          (tag1 == tag2) and recequal(rec1, rec2)
+        | nameType(name2) => name1 == name2
+        | else => false
+      end
+    | anonType(rec1) =>
+      cases(Type) t2:
+        | anonType(rec2) =>
+          recequal(rec1, rec2)
         | else => false
       end
     | arrowType(params1, args1, ret1, rec1) =>
@@ -447,10 +439,9 @@ fun tyequal(t1 :: Type, t2 :: Type) -> Bool:
 where:
   tyequal(nmty("A"), nmty("A")) is true
   tyequal(nmty("A"), nmty("B")) is false
-  tyequal(nmty("A"), baseType(baseTag("A"), moreRecord([pair("b", nmty("Number"))]))) is true
-  tyequal(baseType(baseTag("A"), normalRecord([])), baseType(baseTag("A"), moreRecord([pair("b", nmty("Number"))]))) is false
-  tyequal(baseType(baseTag("A"), normalRecord([])), baseType(baseTag("A"), normalRecord([]))) is true
-  tyequal(baseType(baseTag("A"), normalRecord([])), baseType(baseTag("A"), normalRecord([pair("b", nmty("Number"))]))) is false
+  tyequal(anonType(normalRecord([])), anonType(moreRecord([pair("b", nmty("Number"))]))) is false
+  tyequal(anonType(normalRecord([])), anonType(normalRecord([]))) is true
+  tyequal(anonType(normalRecord([])), anonType(normalRecord([pair("b", nmty("Number"))]))) is false
   tyequal(nmty("A"), arrowType([], [], nmty("A"), moreRecord([]))) is false
   tyequal(arrowType([],[], nmty("A"), moreRecord([pair("b", nmty("Number"))])), arrowType([],[], nmty("A"), moreRecord([]))) is true
   tyequal(arrowType([],[], nmty("A"), normalRecord([pair("b", nmty("Number"))])), arrowType([],[], nmty("A"), moreRecord([]))) is true
@@ -461,11 +452,11 @@ end
 fun get-type(ann :: A.Ann) -> TCST<Type>:
   cases(A.Ann) ann:
     | a_blank => return(dynType)
-    | a_any => return(baseType(topTag, moreRecord([])))
+    | a_any => return(anyType)
     | a_name(l, id) =>
       get-type-env()^bind(fun(type-env):
           cases(Option) map-get(type-env, id):
-            | some(ty) => return(ty)
+            | some(ty) => return(nmty(id))
             | none =>
               add-error(l, msg(errTypeNotDefined, [fmty(nmty(id))]))^seq(
                 return(dynType))
@@ -484,9 +475,7 @@ fun get-type(ann :: A.Ann) -> TCST<Type>:
               fun(t): return(pair(field.name, t)) end)
           end))^bind(
         fun(fieldsty):
-          return(baseType(
-              topTag,
-              normalRecord(fieldsty)))
+          return(anonType(normalRecord(fieldsty)))
         end)
     | else => return(dynType)
   end
@@ -494,25 +483,28 @@ end
 
 fun type-record-add(orig :: Type, field :: String, type :: Type) -> Type:
   cases(Type) orig:
-    | baseType(tags, record) =>
+      # NOTE(dbp 2013-11-05): What do we do in this case? ...rrg.
+    | nameType(name) => nameType(name)
+    | anonType(record) =>
       cases(RecordType) record:
         | normalRecord(fields) =>
-          baseType(tags, normalRecord([pair(field, type)] + fields))
+          anonType(normalRecord([pair(field, type)] + fields))
         | moreRecord(fields) =>
-          baseType(tags, moreRecord([pair(field, type)] + fields))
+          anonType(moreRecord([pair(field, type)] + fields))
       end
       # NOTE(dbp 2013-10-16): Can we start treating this as something
       # better? moreRecord or something?
     | dynType => dynType
+    | anyType => anyType
     | else => raise("type-record-add: didn't match " + torepr(orig))
   end
 where:
-  my-type = baseType(topTag, normalRecord([]))
+  my-type = anonType(normalRecord([]))
   type-record-add(my-type, "foo", my-type)
-  is baseType(topTag, normalRecord([pair("foo", my-type)]))
-  my-more-type = baseType(topTag, moreRecord([]))
+  is anonType(normalRecord([pair("foo", my-type)]))
+  my-more-type = anonType(moreRecord([]))
   type-record-add(my-more-type, "foo", my-type)
-    is baseType(topTag, moreRecord([pair("foo", my-type)]))
+    is anonType(moreRecord([pair("foo", my-type)]))
 end
 
 
@@ -522,7 +514,6 @@ end
 
 fun get-bindings(ast :: A.Expr) -> TCST<List<Pair<String, Type>>>:
   doc: "This function implements letrec behavior."
-  anyty = baseType(topTag, moreRecord([]))
   fun name-val-binds(name, val):
     if A.is-a_blank(name.ann):
       # NOTE(dbp 2013-11-03): Giving the id dyn seems wrong... but
@@ -554,7 +545,7 @@ fun get-bindings(ast :: A.Expr) -> TCST<List<Pair<String, Type>>>:
     | s_datatype(l, name, params, variants, _) =>
       add-types(params.map(fun(n): pair(n, nmty(n)) end),
         sequence(variants.map(get-variant-bindings(name, params, _)))^bind(fun(vbs):
-            return(vbs^concat() + [pair(name, arrowType(params, [anyty], nmty("Bool"), moreRecord([])))])
+            return(vbs^concat() + [pair(name, arrowType(params, [anyType], nmty("Bool"), moreRecord([])))])
           end)
         )
     | else => return([])
@@ -574,7 +565,6 @@ fun get-variant-bindings(tname :: String, tparams :: List<String>, variant :: A.
                                      A.is-s_datatype_singleton_variant(v) end)) ->
     TCST<List<Pair<String, Type>>>:
   bigty = nmty(tname)
-  anyty = baseType(topTag, moreRecord([]))
   boolty = nmty("Bool")
   fun get-member-type(m): get-type(m.bind.ann) end
   cases(A.Variant) variant:
@@ -582,11 +572,11 @@ fun get-variant-bindings(tname :: String, tparams :: List<String>, variant :: A.
     | s_datatype_variant(l, vname, members, constr) =>
       sequence(members.map(get-member-type))^bind(fun(memtys):
           return([pair(vname, arrowType(tparams, memtys, bigty, moreRecord([]))),
-              pair("is-" + vname, arrowType([],[anyty], boolty, moreRecord([])))])
+              pair("is-" + vname, arrowType([],[anyType], boolty, moreRecord([])))])
         end)
     | s_datatype_singleton_variant(l, vname, constr) =>
       return([pair(vname, bigty),
-          pair("is-" + vname, arrowType([],[anyty], boolty, moreRecord([])))])
+          pair("is-" + vname, arrowType([],[anyType], boolty, moreRecord([])))])
   end
 where:
   # NOTE(dbp 2013-10-30): I don't like writing tests with the ast written out
@@ -594,10 +584,9 @@ where:
   # fragments, and parsing larger programs and extracting the parts out doesn't
   # seem any less fragile
   dummy-loc = loc("dummy-file", -1, -1)
-  footy = baseType(baseTag("Foo"), moreRecord([]))
-  anyty = baseType(topTag, moreRecord([]))
-  boolty = baseType(baseTag("Bool"), moreRecord([]))
-  strty = baseType(baseTag("String"), moreRecord([]))
+  footy = nmty("Foo")
+  boolty = nmty("Bool")
+  strty = nmty("String")
   eval(get-variant-bindings("Foo", [],
     A.s_datatype_variant(dummy-loc, "foo",
     [],
@@ -605,7 +594,7 @@ where:
     [], [], [], default-type-env)
   is
   [pair("foo", arrowType([],[], footy, moreRecord([]))),
-    pair("is-foo", arrowType([],[anyty], boolty, moreRecord([])))]
+    pair("is-foo", arrowType([],[anyType], boolty, moreRecord([])))]
 
   eval(get-variant-bindings("Foo", ["T"],
     A.s_datatype_variant(dummy-loc, "foo",
@@ -614,7 +603,7 @@ where:
     [], [],[],default-type-env)
   is
   [pair("foo", arrowType(["T"],[strty], footy, moreRecord([]))),
-    pair("is-foo", arrowType([],[anyty], boolty, moreRecord([])))]
+    pair("is-foo", arrowType([],[anyType], boolty, moreRecord([])))]
 
 
   eval(get-variant-bindings("Foo", [],
@@ -627,7 +616,7 @@ where:
     [], [],[],default-type-env)
   is
   [pair("foo", arrowType([],[strty, boolty], footy, moreRecord([]))),
-    pair("is-foo", arrowType([],[anyty], boolty, moreRecord([])))]
+    pair("is-foo", arrowType([],[anyType], boolty, moreRecord([])))]
 end
 
 fun get-type-bindings(ast :: A.Expr) -> TCST<List<Pair<String>>>:
@@ -726,10 +715,6 @@ end
 ################################################################################
 
 fun subtype(child :: Type, parent :: Type) -> Bool:
-  fun tag-subtype(childT :: TagType, parentT :: TagType) -> Bool:
-    # not real yet
-    (parentT == topTag) or (childT == parentT)
-  end
   fun record-subtype(childR :: RecordType, parentR :: RecordType) -> Bool:
     fun match-child(parent-fields, child-fields):
       for fold(rv from true, fld from parent-fields):
@@ -756,6 +741,7 @@ fun subtype(child :: Type, parent :: Type) -> Bool:
 
   cases(Type) parent:
     | dynType => true
+    | anyType => true
     | arrowType(parentparams, parentargs, parentret, parentrecord) =>
       cases(Type) child:
         | dynType => true
@@ -784,87 +770,124 @@ fun subtype(child :: Type, parent :: Type) -> Bool:
           end
         | else => false
       end
-    | baseType(parenttags, parentrecord) =>
+    | nameType(parentname) =>
       cases(Type) child:
         | dynType => true
-        | baseType(childtags, childrecord) =>
-          tag-subtype(childtags, parenttags) and
-              record-subtype(childrecord, parentrecord)
+        | nameType(childname) => parentname == childname
+        | else => false
+      end
+    | anonType(parentrecord) =>
+      cases(Type) child:
+        | dynType => true
+        | anonType(childrecord) =>
+          record-subtype(childrecord, parentrecord)
         | else => false
       end
   end
 where:
-  topType = baseType(topTag, moreRecord([]))
-  subtype(topType, topType) is true
-  numType = baseType(baseTag("Number"), moreRecord([]))
-  subtype(numType, topType) is true
-  subtype(topType, numType) is false
+  subtype(anyType, anyType) is true
+  numType = nmty("Number")
+  subtype(numType, anyType) is true
+  subtype(anyType, numType) is false
 
-  fun recType(flds): baseType(topTag, normalRecord(flds)) end
+  fun recType(flds): anonType(normalRecord(flds)) end
 
-  subtype(recType([pair("foo", topType)]), topType) is true
-  subtype(recType([pair("foo", topType)]), recType([pair("foo", topType)])) is true
-  subtype(recType([pair("foo", topType)]), recType([pair("foo", numType)])) is false
-  subtype(recType([pair("foo", numType)]), recType([pair("foo", topType)])) is true
+  subtype(recType([pair("foo", anyType)]), anyType) is true
+  subtype(recType([pair("foo", anyType)]), recType([pair("foo", anyType)])) is true
+  subtype(recType([pair("foo", anyType)]), recType([pair("foo", numType)])) is false
+  subtype(recType([pair("foo", numType)]), recType([pair("foo", anyType)])) is true
   subtype(recType([]), recType([pair("foo", numType)])) is false
-  subtype(recType([pair("foo", numType), pair("bar", topType)]),
-    recType([pair("foo", topType)])) is true
+  subtype(recType([pair("foo", numType), pair("bar", anyType)]),
+    recType([pair("foo", anyType)])) is true
 
   subtype(arrowType([],[], dynType, moreRecord([])),        arrowType([],[dynType], dynType, moreRecord([]))) is false
-  subtype(arrowType([],[numType], dynType, moreRecord([])), arrowType([],[topType], dynType, moreRecord([]))) is true
-  subtype(arrowType([],[topType], dynType, moreRecord([])), arrowType([],[numType], dynType, moreRecord([]))) is false
-  subtype(arrowType([],[topType], dynType, moreRecord([])), arrowType([],[topType], dynType, moreRecord([]))) is true
-  subtype(arrowType([],[topType], topType, moreRecord([])), arrowType([],[topType], numType, moreRecord([]))) is true
-  subtype(arrowType([],[topType], numType, moreRecord([])), arrowType([],[topType], topType, moreRecord([]))) is false
+  subtype(arrowType([],[numType], dynType, moreRecord([])), arrowType([],[anyType], dynType, moreRecord([]))) is true
+  subtype(arrowType([],[anyType], dynType, moreRecord([])), arrowType([],[numType], dynType, moreRecord([]))) is false
+  subtype(arrowType([],[anyType], dynType, moreRecord([])), arrowType([],[anyType], dynType, moreRecord([]))) is true
+  subtype(arrowType([],[anyType], anyType, moreRecord([])), arrowType([],[anyType], numType, moreRecord([]))) is true
+  subtype(arrowType([],[anyType], numType, moreRecord([])), arrowType([],[anyType], anyType, moreRecord([]))) is false
 
   subtype(methodType([],dynType, [], dynType, moreRecord([])),
     methodType([],dynType, [dynType], dynType, moreRecord([]))) is false
-  subtype(methodType([],numType, [topType], dynType, moreRecord([])),
-    methodType([],topType, [topType], dynType, moreRecord([]))) is true
-  subtype(methodType([],numType, [topType], dynType, moreRecord([])),
+  subtype(methodType([],numType, [anyType], dynType, moreRecord([])),
+    methodType([],anyType, [anyType], dynType, moreRecord([]))) is true
+  subtype(methodType([],numType, [anyType], dynType, moreRecord([])),
     methodType([],numType, [numType], dynType, moreRecord([]))) is false
-  subtype(methodType([],topType, [topType], dynType, moreRecord([])),
-    methodType([],topType, [topType], dynType, moreRecord([]))) is true
-  subtype(methodType([],numType, [topType], topType, moreRecord([])),
-    methodType([],topType, [topType], numType, moreRecord([]))) is true
-  subtype(methodType([],numType, [topType], numType, moreRecord([])),
-    methodType([],topType, [topType], topType, moreRecord([]))) is false
+  subtype(methodType([],anyType, [anyType], dynType, moreRecord([])),
+    methodType([],anyType, [anyType], dynType, moreRecord([]))) is true
+  subtype(methodType([],numType, [anyType], anyType, moreRecord([])),
+    methodType([],anyType, [anyType], numType, moreRecord([]))) is true
+  subtype(methodType([],numType, [anyType], numType, moreRecord([])),
+    methodType([],anyType, [anyType], anyType, moreRecord([]))) is false
 end
 
 
 ################################################################################
 # tc Helper functions and builtin env and type-env                             #
 ################################################################################
-top-type = baseType(topTag, moreRecord([]))
-list-type = baseType(baseTag("List"), moreRecord([
-      pair("length", methodType([],dynType, [], nmty("Number"), moreRecord([])))
-    ]))
-nothing-type = baseType(baseTag("Nothing"), normalRecord([]))
-
+fun simple-fnty(args, ret):
+  arrowType([], args.map(nmty), nmty(ret), moreRecord([]))
+end
 default-type-env = [
-  pair("Any", top-type),
-  pair("Bool",  baseType(baseTag("Bool"), moreRecord([]))),
-  pair("Number", baseType(baseTag("Number"), moreRecord([]))),
-  pair("String", baseType(baseTag("String"), moreRecord([]))),
-  pair("List", list-type),
-  pair("Nothing", nothing-type)
+  pair("Any", anyType),
+  pair("Bool",  anonType(moreRecord([]))),
+  pair("Number", anonType(moreRecord([]))),
+    #   normalRecord([
+    #       pair("_plus", simple-fnty(["Number", "Number"], "Number")),
+    #       pair("_add", simple-fnty(["Number", "Number"], "Number")),
+    #       pair("_minus", simple-fnty(["Number", "Number"], "Number")),
+    #       pair("_divide", simple-fnty(["Number", "Number"], "Number")),
+    #       pair("_times", simple-fnty(["Number", "Number"], "Number")),
+    #       pair("_torepr", simple-fnty(["Number"], "String")),
+    #       pair("_equals",
+    #       pair("_lessthan",
+    #       pair("_greaterthan",
+    #       pair("_lessequal",
+    #       pair("_greaterequal",
+    #       pair("tostring",
+    #       pair("modulo", simple-fnty(["Number", "Number"], "Number")),
+    #       pair("truncate",
+    #       pair("abs",
+    #       pair("max",
+    #       pair("min",
+    #       pair("sin",
+    #       pair("cos",
+    #       pair("tan",
+    #       pair("asin",
+    #       pair("acos",
+    #       pair("atan",
+    #       pair("sqr",
+    #       pair("sqrt",
+    #       pair("ceiling",
+    #       pair("floor",
+    #       pair("log",
+    #       pair("exp",
+    #       pair("exact",
+    #       pair("is-integer",
+    #       pair("expt", simple-fnty(["Number", "Number"], "Number"))
+    #     ]))
+    # ),
+  pair("String", anonType(moreRecord([]))),
+  pair("List", anonType(moreRecord([
+      pair("length", methodType([],dynType, [], nmty("Number"), moreRecord([])))
+    ]))),
+  pair("Nothing", anonType(normalRecord([])))
 ]
 
 fun tc-main(p, s):
   env = [
-    pair("Any", top-type),
-    pair("list", baseType(botTag,
+    pair("list", anonType(
         moreRecord([
-            pair("map", top-type),
-            pair("link", arrowType([],[top-type, list-type], list-type, moreRecord([]))),
-            pair("empty", list-type)
+            pair("map", dynType),
+            pair("link", arrowType([],[anyType, nmty("List")], nmty("List"), moreRecord([]))),
+            pair("empty", nmty("List"))
           ]))),
-    pair("builtins", baseType(botTag,
+    pair("builtins", anonType(
         moreRecord([]))),
-    pair("link", arrowType([],[dynType, dynType], list-type, moreRecord([]))),
-    pair("empty", list-type),
-    pair("nothing", nothing-type),
-    pair("print", arrowType([], [top-type], nothing-type, moreRecord([])))
+    pair("link", arrowType([],[anyType, nmty("List")], nmty("List"), moreRecord([]))),
+    pair("empty", nmty("List")),
+    pair("nothing", nmty("Nothing")),
+    pair("print", arrowType([], [anyType], nmty("Nothing"), moreRecord([])))
   ]
   stx = s^A.parse(p, { ["check"]: false})
   # NOTE(dbp 2013-11-03): This is sort of crummy. Need to get bindings first, for use
@@ -1003,7 +1026,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                         end)
                     end)
                 | s_assign(l, id, val) => return(dynType)
-                | s_if(l, branches) => return(dynType)
+                | s_if_else(l, branches, elsebranch) => return(dynType)
                 | s_lam(l, ps, args, ann, doc, body, ck) =>
                   # NOTE(dbp 2013-11-03): Check for type shadowing.
                   add-types(ps.map(fun(n): pair(n, nmty(n)) end),
@@ -1047,11 +1070,11 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                               # NOTE(dbp 2013-10-16): This is a little bit of a hack -
                               # to reuse the helper that wants to operate on types.
                             | some(fty) =>
-                              return(type-record-add(baseType(topTag,acc), fty.a, fty.b).record)
+                              return(type-record-add(anonType(acc), fty.a, fty.b).record)
                           end
                         end)
                     end)^bind(fun(record):
-                      return(baseType(botTag, record))
+                      return(anonType(record))
                     end)
                 | s_app(l, fn, args) =>
                   tc(fn)^bind(fun(fn-ty):
@@ -1069,7 +1092,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                                 sequence(
                                   for map2(at from arg-types, av from arg-vals):
                                     # NOTE(dbp 2013-11-04): If it is a type parameter, instantiate it greedily.
-                                    if is-baseType(at) and is-baseTag(at.tag) and params.member(at.tag.name):
+                                    if is-nameType(at) and params.member(at.name):
                                       cases(Option) map-get(param-inst, at):
                                         | none =>
                                           param-inst := link(pair(at, av), param-inst)
@@ -1093,7 +1116,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                                   end)^seq(block:
                                   if arg-error:
                                     return(dynType)
-                                  else if is-baseType(ret-type) and is-baseTag(ret-type.tag) and params.member(ret-type.tag.name):
+                                  else if is-nameType(ret-type) and params.member(ret-type.name):
                                     cases(Option) map-get(param-inst, ret-type):
                                       | nothing =>
                                         # NOTE(dbp 2013-11-04): I don't actually think there is a way for this to happen...
@@ -1135,22 +1158,41 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                   end
                   cases(A.Expr) field:
                     | s_str(l1, s) =>
+                      fun record-lookup(record):
+                        cases(RecordType) record:
+                          | normalRecord(fields) =>
+                            cases(Option) map-get(fields, s):
+                              | none => add-error(l, msg(errFieldNotFound, [s]))^seq(return(dynType))
+                              | some(ty) => return(method-apply(ty))
+                            end
+                          | moreRecord(fields) =>
+                            cases(Option) map-get(fields, s):
+                              | none => return(dynType)
+                              | some(ty) => return(method-apply(ty))
+                            end
+                        end
+                      end
+                      fun record-name-lookup(name):
+                        get-type-env()^bind(fun(type-env):
+                            cases(Option) map-get(type-env, name):
+                              | none => add-error(l, msg(errTypeNotDefined, [fmty(nmty(name))]))^seq(return(dynType))
+                              | some(recordty) =>
+                                cases(Type) recordty:
+                                  | anonType(record) => record-lookup(record)
+                                  | anyType => return(dynType)
+                                  | dynType => return(dynType)
+                                    # NOTE(dbp 2013-11-05): Not doing cycle detection in type env. Could go into an infinite loop.
+                                  | nameType(name2) => record-name-lookup(name2)
+                                end
+                            end
+                          end)
+                      end
                       tc(obj)^bind(fun(obj-ty):
                           cases(Type) obj-ty:
                             | dynType => return(dynType)
-                            | else =>
-                              cases(RecordType) obj-ty.record:
-                                | normalRecord(fields) =>
-                                  cases(Option) map-get(fields, s):
-                                    | none => add-error(l, msg(errFieldNotFound, [s]))^seq(return(dynType))
-                                    | some(ty) => return(method-apply(ty))
-                                  end
-                                | moreRecord(fields) =>
-                                  cases(Option) map-get(fields, s):
-                                    | none => return(dynType)
-                                    | some(ty) => return(method-apply(ty))
-                                  end
-                              end
+                            | anyType => return(dynType)
+                            | anonType(record) => record-lookup(record)
+                            | nameType(name) => record-name-lookup(name)
                           end
                         end)
                     | else =>
@@ -1221,7 +1263,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                                                       end
                                                     end))
                                               end
-                                            | baseType(_,_) =>
+                                            | nameType(_) =>
                                               if not tyequal(ty, type):
                                                 add-error(branch.l,
                                                   msg(errCasesBranchInvalidVariant, [fmty(type), branch.name])
