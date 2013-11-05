@@ -312,6 +312,12 @@ data TCError:
       "The return type was a type parameter that did not
       appear in the argument list."
     end
+  | errIfTestNotBool with: tostring(self):
+      "A branch of the if has a test that is not a Bool"
+    end
+  | errIfBranchType with: tostring(self):
+      "All branches of an if expression must evaluate to the same type."
+    end
 end
 
 fun msg(err :: TCError, values :: List<Any>) -> String:
@@ -1007,7 +1013,8 @@ fun tc-main(p, s):
     pair("nothing", nmty("Nothing")),
     pair("true", nmty("Bool")),
     pair("false", nmty("Bool")),
-    pair("print", arrowType([], [anyType], nmty("Nothing"), moreRecord([])))
+    pair("print", arrowType([], [anyType], nmty("Nothing"), moreRecord([]))),
+    pair("raise", arrowType([], [anyType], anyType, moreRecord([])))
   ]
   stx = s^A.parse(p, { ["check"]: false})
   # NOTE(dbp 2013-11-03): This is sort of crummy. Need to get bindings first, for use
@@ -1150,7 +1157,35 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                         end)
                     end)
                 | s_assign(l, id, val) => return(dynType)
-                | s_if_else(l, branches, elsebranch) => return(dynType)
+                | s_if_else(l, branches, elsebranch) =>
+                  tc(elsebranch)^bind(fun(_branches-ty):
+                      var branches-ty = _branches-ty
+                      sequence(branches.map(fun(branch):
+                            tc(branch.test)^bind(fun(ty):
+                                if tyequal(nmty("Bool"), ty):
+                                  return(nothing)
+                                else:
+                                  add-error(branch.l, msg(errIfTestNotBool, []))
+                                end
+                              end)
+                          end))^seq(
+                        sequence(branches.map(fun(branch):
+                              tc(branch.body)^bind(fun(branchty):
+                                  if branches-ty == anyType: # was no else branch
+                                    branches-ty := branchty
+                                    return(branchty)
+                                  else:
+                                    if branchty == branches-ty:
+                                      return(branchty)
+                                    else:
+                                      add-error(branch.l,
+                                        msg(errIfBranchType, [])
+                                        )^seq(return(branches-ty))
+                                    end
+                                  end
+                                end)
+                            end)))^seq(return(branches-ty))
+                    end)
                 | s_lam(l, ps, args, ann, doc, body, ck) =>
                   # NOTE(dbp 2013-11-03): Check for type shadowing.
                   add-types(ps.map(fun(n): pair(n, typeNominal(nmty(n))) end),
