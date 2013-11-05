@@ -90,6 +90,11 @@ sharing:
   end
 end
 
+data TypeBinding:
+  | typeAlias(type :: Type)
+  | typeNominal(type :: Type)
+end
+
 #####################################################################
 #                                                                   #
 #     This is a big State Monad, so we can thread all the stuff.    #
@@ -102,7 +107,7 @@ data TCstate:
       errors :: List<TypeError>,
       iifs :: List<Pair<String, Type>>,
       env :: List<Pair<String, Type>>,
-      type-env :: List<Pair<String, Type>>
+      type-env :: List<Pair<String, TypeBinding>>
       )
 end
 
@@ -456,7 +461,7 @@ fun get-type(ann :: A.Ann) -> TCST<Type>:
     | a_name(l, id) =>
       get-type-env()^bind(fun(type-env):
           cases(Option) map-get(type-env, id):
-            | some(ty) => return(nmty(id))
+            | some(_) => return(nmty(id))
             | none =>
               add-error(l, msg(errTypeNotDefined, [fmty(nmty(id))]))^seq(
                 return(dynType))
@@ -543,7 +548,7 @@ fun get-bindings(ast :: A.Expr) -> TCST<List<Pair<String, Type>>>:
     #     fun(binds, base): base.chain((_+_), binds) end, envs
     #     )
     | s_datatype(l, name, params, variants, _) =>
-      add-types(params.map(fun(n): pair(n, nmty(n)) end),
+      add-types(params.map(fun(n): pair(n, typeNominal(nmty(n))) end),
         sequence(variants.map(get-variant-bindings(name, params, _)))^bind(fun(vbs):
             return(vbs^concat() + [pair(name, arrowType(params, [anyType], nmty("Bool"), moreRecord([])))])
           end)
@@ -625,7 +630,7 @@ fun get-type-bindings(ast :: A.Expr) -> TCST<List<Pair<String>>>:
       sequence(stmts.map(get-type-bindings))^bind(fun(bs): return(concat(bs)) end)
     | s_user_block(l, block) => get-type-bindings(block)
     | s_datatype(l, name, _, _, _) =>
-      return([pair(name, nmty(name))])
+      return([pair(name, typeNominal(nmty(name)))])
     | else => return([])
   end
 where:
@@ -633,10 +638,10 @@ where:
     eval(get-type-bindings(A.parse(src,"anonymous-file", { ["check"]: false}).with-types.block), [], [], [], [])
   end
   gtb-src("x = 2") is []
-  gtb-src("datatype Foo: | foo with constructor(self): self end end") is [pair("Foo", nmty("Foo"))]
+  gtb-src("datatype Foo: | foo with constructor(self): self end end") is [pair("Foo", typeNominal(nmty("Foo")))]
   gtb-src("datatype Foo: | foo with constructor(self): self end end
            datatype Bar: | bar with constructor(self): self end end") is
-  [pair("Foo", nmty("Foo")), pair("Bar", nmty("Bar"))]
+  [pair("Foo", typeNominal(nmty("Foo"))), pair("Bar", typeNominal(nmty("Bar")))]
 end
 
 
@@ -714,111 +719,210 @@ end
 # Subtyping.                                                                   #
 ################################################################################
 
-fun subtype(child :: Type, parent :: Type) -> Bool:
-  fun record-subtype(childR :: RecordType, parentR :: RecordType) -> Bool:
-    fun match-child(parent-fields, child-fields):
-      for fold(rv from true, fld from parent-fields):
-      cases(Option) map-get(child-fields, fld.a):
-        | none => false
-        | some(cty) => rv and (subtype(cty, fld.b))
+# FIXME(dbp 2013-11-05): The naive implementation of this, which resolves names
+# to records through the type env, is broken with aliases because it infinite loops very easily.
+# what I have now is a very naive avoidance - ie, I only expand one level, but
+# obviously this should be replaced with something more correct (with cycle detection).
+# for now, this doesn't matter, since we don't have type aliases in the language.
+fun subtype(l :: Loc, _child :: Type, _parent :: Type) -> TCST<Bool>:
+  fun subtype-int(recur :: Bool, child :: Type, parent :: Type) -> TCST<Bool>:
+    fun record-subtype(childR :: RecordType, parentR :: RecordType) -> TCST<Bool>:
+      fun match-child(parent-fields, child-fields):
+        for foldm(rv from true, fld from parent-fields):
+          cases(Option) map-get(child-fields, fld.a):
+            | none => return(false)
+            | some(cty) => subtype-int(recur, cty, fld.b)^bind(fun(st): return(rv and st) end)
+          end
+        end
       end
-    end
-    end
-    fun fields-child(fields):
-      cases(RecordType) childR:
+      fun fields-child(fields):
+        cases(RecordType) childR:
           | normalRecord(c-fields) =>
             match-child(fields, c-fields)
           | moreRecord(c-fields) =>
             # TODO(dbp 2013-10-16): figure out what to do about more
             match-child(fields, c-fields)
         end
+      end
+      cases(RecordType) parentR:
+        | normalRecord(p-fields) => fields-child(p-fields)
+        | moreRecord(p-fields) => fields-child(p-fields)
+      end
     end
-    cases(RecordType) parentR:
-      | normalRecord(p-fields) => fields-child(p-fields)
-      | moreRecord(p-fields) => fields-child(p-fields)
-    end
-  end
 
-  cases(Type) parent:
-    | dynType => true
-    | anyType => true
-    | arrowType(parentparams, parentargs, parentret, parentrecord) =>
-      cases(Type) child:
-        | dynType => true
-        | arrowType(childparams, childargs, childret, childrecord) =>
-          # NOTE(dbp 2013-11-04): To do this correctly, probably need to canonically rename type params.
-          for fold2(wt from (childargs.length() == parentargs.length())
-                            and subtype(parentret, childret)
-                            and (parentparams == childparams),
-                    ct from childargs,
-                    pt from parentargs):
-            wt and subtype(ct, pt)
-          end
-        | else => false
-      end
-    | methodType(parentparams, parentself, parentargs, parentret, parentrecord) =>
-      cases(Type) child:
-        | dynType => true
-        | methodType(childparams, childself, childargs, childret, childrecord) =>
-          for fold2(wt from (childargs.length() == parentargs.length())
-                            and subtype(parentret, childret)
-                            and subtype(childself, parentself)
-                            and (parentparams == childparams),
-              ct from childargs,
-              pt from parentargs):
-            wt and subtype(ct, pt)
-          end
-        | else => false
-      end
-    | nameType(parentname) =>
-      cases(Type) child:
-        | dynType => true
-        | nameType(childname) => parentname == childname
-        | else => false
-      end
-    | anonType(parentrecord) =>
-      cases(Type) child:
-        | dynType => true
-        | anonType(childrecord) =>
-          record-subtype(childrecord, parentrecord)
-        | else => false
-      end
+    cases(Type) parent:
+      | dynType => return(true)
+      | anyType => return(true)
+      | arrowType(parentparams, parentargs, parentret, parentrecord) =>
+        cases(Type) child:
+          | dynType => return(true)
+          | arrowType(childparams, childargs, childret, childrecord) =>
+            # NOTE(dbp 2013-11-04): To do this correctly, probably need to canonically rename type params.
+            subtype-int(recur, parentret, childret)^bind(fun(retres):
+                for foldm(wt from (childargs.length() == parentargs.length()) and
+                    retres and (parentparams == childparams),
+                    cp from (map2(pair, childargs, parentargs))):
+                  subtype-int(recur, cp.a, cp.b)^bind(fun(wt2): return(wt and wt2) end)
+                end
+              end)
+          | else => return(false)
+        end
+      | methodType(parentparams, parentself, parentargs, parentret, parentrecord) =>
+        cases(Type) child:
+          | dynType => return(true)
+          | methodType(childparams, childself, childargs, childret, childrecord) =>
+            subtype-int(recur, parentret, childret)^bind(fun(retres):
+                subtype-int(recur, childself, parentself)^bind(fun(selfres):
+                    for foldm(wt from (childargs.length() == parentargs.length()) and
+                        retres and selfres and (parentparams == childparams),
+                        cp from (map2(pair, childargs, parentargs))):
+                      subtype-int(recur, cp.a, cp.b)^bind(fun(wt2): return(wt and wt2) end)
+                    end
+                  end)
+              end)
+          | else => return(false)
+        end
+      | nameType(parentname) =>
+        cases(Type) child:
+          | dynType => return(true)
+          | nameType(childname) =>
+            if parentname == childname:
+              return(true)
+            else:
+              if not recur:
+                return(false)
+              else:
+                get-type-env()^bind(fun(type-env):
+                    cases(Option) map-get(type-env, parentname):
+                      | none =>
+                        add-error(l, msg(errTypeNotDefined, [fmty(nmty(parentname))]))^seq(
+                          return(false))
+                      | some(parentbind) =>
+                        cases(TypeBinding) parentbind:
+                          | typeNominal(_) =>
+                            cases(Option) map-get(type-env, childname):
+                              | none =>
+                                add-error(l, msg(errTypeNotDefined, [fmty(nmty(childname))]))^seq(
+                                  return(false))
+                              | some(childbind) =>
+                                cases(TypeBinding) childbind:
+                                  | typeNominal(_) => return(false)
+                                  | typeAlias(childty) =>
+                                    subtype-int(false,  childty, parent)
+                                end
+                            end
+                          | typeAlias(parentty) =>
+                            cases(Option) map-get(type-env, childname):
+                              | none =>
+                                add-error(l, msg(errTypeNotDefined, [fmty(nmty(childname))]))^seq(
+                                  return(false))
+                              | some(childbind) =>
+                                cases(TypeBinding) childbind:
+                                  | typeNominal(_) => subtype-int(false, child, parentty)
+                                  | typeAlias(childty) =>
+                                    subtype-int(false,  childty, parentty)
+                                end
+                            end
+                        end
+                    end
+                  end)
+              end
+            end
+          | anonType(childrecord) =>
+            if not recur:
+              return(false)
+            else:
+              get-type-env()^bind(fun(type-env):
+                  cases(Option) map-get(type-env, parentname):
+                    | none =>
+                      add-error(l, msg(errTypeNotDefined, [fmty(nmty(parentname))]))^seq(
+                        return(dynType))
+                    | some(parentbind) =>
+                      cases(TypeBinding) parentbind:
+                        | typeNominal(_) => return(false)
+                        | typeAlias(parentty) =>
+                          subtype-int(false, child, parentty)
+                      end
+                  end
+                end)
+            end
+          | else => return(false)
+        end
+      | anonType(parentrecord) =>
+        cases(Type) child:
+          | dynType => return(true)
+          | anonType(childrecord) =>
+            record-subtype(childrecord, parentrecord)
+          | nameType(childname) =>
+            if not recur:
+              return(false)
+            else:
+              get-type-env()^bind(fun(type-env):
+                  cases(Option) map-get(type-env, childname):
+                    | none =>
+                      add-error(l, msg(errTypeNotDefined, [fmty(nmty(childname))]))^seq(
+                        return(dynType))
+                    | some(childbind) =>
+                      cases(TypeBinding) childbind:
+                        | typeNominal(_) => return(false)
+                        | typeAlias(childty) =>
+                          subtype-int(false, childty, parent)
+                      end
+                  end
+                end)
+            end
+          | else => return(false)
+        end
+    end
   end
+  subtype-int(true, _child, _parent)
 where:
-  subtype(anyType, anyType) is true
+  l = loc("", 0, 0)
+  eval(subtype(l, anyType, anyType), [], [], [], default-type-env) is true
   numType = nmty("Number")
-  subtype(numType, anyType) is true
-  subtype(anyType, numType) is false
+  eval(subtype(l, numType, anyType), [], [], [], default-type-env) is true
+  eval(subtype(l, anyType, numType), [], [], [], default-type-env) is false
+
+  eval(subtype(l, nmty("Any"), nmty("Any")), [], [], [], default-type-env) is true
+  eval(subtype(l, numType, nmty("Any")), [], [], [], default-type-env) is true
+  eval(subtype(l, nmty("Any"), numType), [], [], [], default-type-env) is false
 
   fun recType(flds): anonType(normalRecord(flds)) end
 
-  subtype(recType([pair("foo", anyType)]), anyType) is true
-  subtype(recType([pair("foo", anyType)]), recType([pair("foo", anyType)])) is true
-  subtype(recType([pair("foo", anyType)]), recType([pair("foo", numType)])) is false
-  subtype(recType([pair("foo", numType)]), recType([pair("foo", anyType)])) is true
-  subtype(recType([]), recType([pair("foo", numType)])) is false
-  subtype(recType([pair("foo", numType), pair("bar", anyType)]),
-    recType([pair("foo", anyType)])) is true
+  eval(subtype(l, recType([pair("foo", anyType)]), anyType), [], [], [], default-type-env) is true
+  eval(subtype(l, recType([pair("foo", anyType)]), recType([pair("foo", anyType)])), [], [], [], default-type-env) is true
+  eval(subtype(l, recType([pair("foo", anyType)]), recType([pair("foo", numType)])), [], [], [], default-type-env) is false
+  eval(subtype(l, recType([pair("foo", numType)]), recType([pair("foo", anyType)])), [], [], [], default-type-env) is true
+  eval(subtype(l, recType([]), recType([pair("foo", numType)])), [], [], [], default-type-env) is false
+  eval(subtype(l, recType([pair("foo", numType), pair("bar", anyType)]),
+      recType([pair("foo", anyType)])), [], [], [], default-type-env) is true
 
-  subtype(arrowType([],[], dynType, moreRecord([])),        arrowType([],[dynType], dynType, moreRecord([]))) is false
-  subtype(arrowType([],[numType], dynType, moreRecord([])), arrowType([],[anyType], dynType, moreRecord([]))) is true
-  subtype(arrowType([],[anyType], dynType, moreRecord([])), arrowType([],[numType], dynType, moreRecord([]))) is false
-  subtype(arrowType([],[anyType], dynType, moreRecord([])), arrowType([],[anyType], dynType, moreRecord([]))) is true
-  subtype(arrowType([],[anyType], anyType, moreRecord([])), arrowType([],[anyType], numType, moreRecord([]))) is true
-  subtype(arrowType([],[anyType], numType, moreRecord([])), arrowType([],[anyType], anyType, moreRecord([]))) is false
+  eval(subtype(l, arrowType([],[], dynType, moreRecord([])),
+      arrowType([],[dynType], dynType, moreRecord([]))), [], [], [], default-type-env) is false
+  eval(subtype(l, arrowType([],[numType], dynType, moreRecord([])),
+      arrowType([],[anyType], dynType, moreRecord([]))), [], [], [], default-type-env) is true
+  eval(subtype(l, arrowType([],[anyType], dynType, moreRecord([])),
+      arrowType([],[numType], dynType, moreRecord([]))), [], [], [], default-type-env) is false
+  eval(subtype(l, arrowType([],[anyType], dynType, moreRecord([])),
+      arrowType([],[anyType], dynType, moreRecord([]))), [], [], [], default-type-env) is true
+  eval(subtype(l, arrowType([],[anyType], anyType, moreRecord([])),
+      arrowType([],[anyType], numType, moreRecord([]))), [], [], [], default-type-env) is true
+  eval(subtype(l, arrowType([],[anyType], numType, moreRecord([])),
+      arrowType([],[anyType], anyType, moreRecord([]))), [], [], [], default-type-env) is false
 
-  subtype(methodType([],dynType, [], dynType, moreRecord([])),
-    methodType([],dynType, [dynType], dynType, moreRecord([]))) is false
-  subtype(methodType([],numType, [anyType], dynType, moreRecord([])),
-    methodType([],anyType, [anyType], dynType, moreRecord([]))) is true
-  subtype(methodType([],numType, [anyType], dynType, moreRecord([])),
-    methodType([],numType, [numType], dynType, moreRecord([]))) is false
-  subtype(methodType([],anyType, [anyType], dynType, moreRecord([])),
-    methodType([],anyType, [anyType], dynType, moreRecord([]))) is true
-  subtype(methodType([],numType, [anyType], anyType, moreRecord([])),
-    methodType([],anyType, [anyType], numType, moreRecord([]))) is true
-  subtype(methodType([],numType, [anyType], numType, moreRecord([])),
-    methodType([],anyType, [anyType], anyType, moreRecord([]))) is false
+  eval(subtype(l, methodType([],dynType, [], dynType, moreRecord([])),
+      methodType([],dynType, [dynType], dynType, moreRecord([]))), [], [], [], default-type-env) is false
+  eval(subtype(l, methodType([],numType, [anyType], dynType, moreRecord([])),
+      methodType([],anyType, [anyType], dynType, moreRecord([]))), [], [], [], default-type-env) is true
+  eval(subtype(l, methodType([],numType, [anyType], dynType, moreRecord([])),
+      methodType([],numType, [numType], dynType, moreRecord([]))), [], [], [], default-type-env) is false
+  eval(subtype(l, methodType([],anyType, [anyType], dynType, moreRecord([])),
+      methodType([],anyType, [anyType], dynType, moreRecord([]))), [], [], [], default-type-env) is true
+  eval(subtype(l, methodType([],numType, [anyType], anyType, moreRecord([])),
+      methodType([],anyType, [anyType], numType, moreRecord([]))), [], [], [], default-type-env) is true
+  eval(subtype(l, methodType([],numType, [anyType], numType, moreRecord([])),
+      methodType([],anyType, [anyType], anyType, moreRecord([]))), [], [], [], default-type-env) is false
+
 end
 
 
@@ -826,13 +930,27 @@ end
 # tc Helper functions and builtin env and type-env                             #
 ################################################################################
 fun simple-mty(self, args, ret):
-  methodType([], nmty(self), args.map(nmty), nmty(ret), moreRecord([]))
+  fun mkty(t):
+    if String(t):
+      nmty(t)
+    else:
+      t
+    end
+  end
+  methodType([], mkty(self), args.map(mkty), mkty(ret), moreRecord([]))
 end
 default-type-env = [
-  pair("Any", anyType),
-  pair("Bool",  anonType(moreRecord([]))),
+  pair("Any", typeAlias(anyType)),
+  pair("Bool",  typeNominal(anonType(normalRecord([
+          pair("_and", simple-mty("Bool", [arrowType([], [], nmty("Bool"), moreRecord([]))], "Bool")),
+          pair("_or", simple-mty("Bool", [arrowType([], [], nmty("Bool"), moreRecord([]))], "Bool")),
+          pair("tostring", simple-mty("Bool", [], "String")),
+          pair("_torepr",  simple-mty("Bool", [], "String")),
+          pair("_equals",  simple-mty("Bool", ["Any"], "Bool")),
+          pair("_not", simple-mty("Bool", [], "Bool"))
+        ])))),
   pair("Number",
-      anonType(normalRecord([
+      typeNominal(anonType(normalRecord([
           pair("_plus", simple-mty("Number", ["Number"], "Number")),
           pair("_add", simple-mty("Number", ["Number"], "Number")),
           pair("_minus", simple-mty("Number", ["Number"], "Number")),
@@ -865,13 +983,13 @@ default-type-env = [
           pair("exact", simple-mty("Number", [], "Number")),
           pair("is-integer", simple-mty("Number", [], "Bool")),
           pair("expt", simple-mty("Number", ["Number"], "Number"))
-        ]))
+        ])))
     ),
-  pair("String", anonType(moreRecord([]))),
-  pair("List", anonType(moreRecord([
+  pair("String", typeNominal(anonType(moreRecord([])))),
+  pair("List", typeNominal(anonType(moreRecord([
       pair("length", methodType([],dynType, [], nmty("Number"), moreRecord([])))
-    ]))),
-  pair("Nothing", anonType(normalRecord([])))
+    ])))),
+  pair("Nothing", typeNominal(anonType(normalRecord([]))))
 ]
 
 fun tc-main(p, s):
@@ -887,6 +1005,8 @@ fun tc-main(p, s):
     pair("link", arrowType([],[anyType, nmty("List")], nmty("List"), moreRecord([]))),
     pair("empty", nmty("List")),
     pair("nothing", nmty("Nothing")),
+    pair("true", nmty("Bool")),
+    pair("false", nmty("Bool")),
     pair("print", arrowType([], [anyType], nmty("Nothing"), moreRecord([])))
   ]
   stx = s^A.parse(p, { ["check"]: false})
@@ -965,13 +1085,15 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                           cases(option.Option) map-get(iifs, name.id):
                             | none =>
                               tc(val)^bind(fun(ty):
-                                  if not subtype(ty, bindty):
-                                    add-error(l, msg(errAssignWrongType,
-                                        [name.id, fmty(bindty), fmty(ty)]))^seq(
-                                      return(dynType))
-                                  else:
-                                    return(ty)
-                                  end
+                                  subtype(l, ty, bindty)^bind(fun(st):
+                                      if not st:
+                                        add-error(l, msg(errAssignWrongType,
+                                            [name.id, fmty(bindty), fmty(ty)]))^seq(
+                                          return(dynType))
+                                      else:
+                                        return(ty)
+                                      end
+                                    end)
                                 end)
                             | some(fty) =>
                               # NOTE(dbp 2013-10-21): we want to type check the function
@@ -998,18 +1120,20 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                                         end,
                                         tc(body)^bind(fun(body-ty):
                                             (if A.is-a_blank(ann): return(fty.ret) else: get-type(ann) end)^bind(fun(ret-ty):
-                                                if subtype(body-ty, ret-ty):
-                                                  return(arrowType(ps, arg-tys, ret-ty, moreRecord([])))
-                                                else:
-                                                  add-error(l,
-                                                    if inferred:
-                                                      msg(errFunctionInferredIncompatibleReturn,
-                                                        [fmty(body-ty), fmty(ret-ty)])
+                                                subtype(l, body-ty, ret-ty)^bind(fun(st):
+                                                    if st:
+                                                      return(arrowType(ps, arg-tys, ret-ty, moreRecord([])))
                                                     else:
-                                                      msg(errFunctionAnnIncompatibleReturn,
-                                                        [fmty(body-ty), fmty(ret-ty)])
-                                                    end)^seq(return(dynType))
-                                                end
+                                                      add-error(l,
+                                                        if inferred:
+                                                          msg(errFunctionInferredIncompatibleReturn,
+                                                            [fmty(body-ty), fmty(ret-ty)])
+                                                        else:
+                                                          msg(errFunctionAnnIncompatibleReturn,
+                                                            [fmty(body-ty), fmty(ret-ty)])
+                                                        end)^seq(return(dynType))
+                                                    end
+                                                  end)
                                               end)
                                           end)
                                         )
@@ -1029,19 +1153,21 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                 | s_if_else(l, branches, elsebranch) => return(dynType)
                 | s_lam(l, ps, args, ann, doc, body, ck) =>
                   # NOTE(dbp 2013-11-03): Check for type shadowing.
-                  add-types(ps.map(fun(n): pair(n, nmty(n)) end),
+                  add-types(ps.map(fun(n): pair(n, typeNominal(nmty(n))) end),
                     get-type(ann)^bind(fun(ret-ty):
                         sequence(args.map(fun(b): get-type(b.ann)^bind(fun(t): return(pair(b.id, t)) end) end))^bind(fun(new-binds):
                             add-bindings(new-binds,
                               tc(body)^bind(fun(body-ty):
-                                  if subtype(body-ty, ret-ty):
-                                    return(arrowType(ps, new-binds.map(fun(bnd): bnd.b end), ret-ty, moreRecord([])))
-                                  else:
-                                    add-error(l,
-                                      msg(errFunctionAnnIncompatibleReturn,
-                                        [fmty(body-ty), fmty(ret-ty)]))^seq(
-                                      return(dynType))
-                                  end
+                                  subtype(l, body-ty, ret-ty)^bind(fun(st):
+                                      if st:
+                                        return(arrowType(ps, new-binds.map(fun(bnd): bnd.b end), ret-ty, moreRecord([])))
+                                      else:
+                                        add-error(l,
+                                          msg(errFunctionAnnIncompatibleReturn,
+                                            [fmty(body-ty), fmty(ret-ty)]))^seq(
+                                          return(dynType))
+                                      end
+                                    end)
                                 end)
                               )
                           end)
@@ -1106,12 +1232,16 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                                             return(nothing)
                                           end
                                       end
-                                    else if not subtype(av, at):
-                                      arg-error := true
-                                      add-error(l,
-                                        msg(errArgumentBadType, [counter, fmty(at), fmty(av)]))
                                     else:
-                                      return(nothing)
+                                      subtype(l, av, at)^bind(fun(res):
+                                          if not res:
+                                            arg-error := true
+                                            add-error(l,
+                                              msg(errArgumentBadType, [counter, fmty(at), fmty(av)]))
+                                          else:
+                                            return(nothing)
+                                          end
+                                        end)
                                     end
                                   end)^seq(block:
                                   if arg-error:
@@ -1176,8 +1306,8 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                         get-type-env()^bind(fun(type-env):
                             cases(Option) map-get(type-env, name):
                               | none => add-error(l, msg(errTypeNotDefined, [fmty(nmty(name))]))^seq(return(dynType))
-                              | some(recordty) =>
-                                cases(Type) recordty:
+                              | some(recordbind) =>
+                                cases(Type) recordbind.type:
                                   | anonType(record) => record-lookup(record)
                                   | anyType => return(dynType)
                                   | dynType => return(dynType)
@@ -1209,90 +1339,92 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                     fun(type):
                       tc(val)^bind(
                         fun(val-ty):
-                          if not subtype(type, val-ty):
-                            add-error(l,
-                              msg(errCasesValueBadType, [fmty(type), fmty(val-ty)])
-                              )^seq(return(dynType))
-                          else:
-                            get-env()^bind(
-                              fun(env):
-                                var branches-ty = dynType
-                                sequence(branches.map(fun(branch):
-                                      # TODO(dbp 2013-10-30): Need to have a data-env, so we can
-                                      # pick up non-bound constructors.
-                                      cases(Option) map-get(env, branch.name):
-                                        | none => add-error(branch.l,
-                                            msg(errCasesBranchInvalidVariant, [fmty(type), branch.name])
-                                            )
-                                        | some(ty) =>
-                                          cases(Type) ty:
-                                            | arrowType(params, args, ret, rec) =>
-                                              # NOTE(dbp 2013-10-30): No subtyping - cases type
-                                              # must match constructors exactly (modulo records)
-                                              if not tyequal(ret, type):
-                                                add-error(branch.l,
-                                                  msg(errCasesBranchInvalidVariant, [fmty(type), branch.name])
-                                                  )
-                                              else if args.length() <> branch.args.length():
-                                                add-error(branch.l,
-                                                  msg(errCasesPatternNumberFields,
-                                                    [branch.name, args.length(), branch.args.length()])
-                                                  )
-                                              else:
-                                                # NOTE(dbp 2013-10-30): We want to check that
-                                                # branches have the same type.  This is slightly
-                                                # tricky, so we'll opt for a temporary but dynless solution -
-                                                # set it to the first branches type, and make
-                                                # sure all the rest are equal.
-                                                add-bindings(for map2(bnd from branch.args,
-                                                      argty from args):
-                                                    pair(bnd.id, argty)
-                                                  end,
-                                                  tc(branch.body)^bind(fun(branchty):
-                                                      if branches-ty == dynType: # in first branch
-                                                        branches-ty := branchty
-                                                        return(branchty)
-                                                      else:
-                                                        if branchty == branches-ty:
+                          subtype(l, type, val-ty)^bind(fun(st):
+                              if not st:
+                                add-error(l,
+                                  msg(errCasesValueBadType, [fmty(type), fmty(val-ty)])
+                                  )^seq(return(dynType))
+                              else:
+                                get-env()^bind(
+                                  fun(env):
+                                    var branches-ty = dynType
+                                    sequence(branches.map(fun(branch):
+                                          # TODO(dbp 2013-10-30): Need to have a data-env, so we can
+                                          # pick up non-bound constructors.
+                                          cases(Option) map-get(env, branch.name):
+                                            | none => add-error(branch.l,
+                                                msg(errCasesBranchInvalidVariant, [fmty(type), branch.name])
+                                                )
+                                            | some(ty) =>
+                                              cases(Type) ty:
+                                                | arrowType(params, args, ret, rec) =>
+                                                  # NOTE(dbp 2013-10-30): No subtyping - cases type
+                                                  # must match constructors exactly (modulo records)
+                                                  if not tyequal(ret, type):
+                                                    add-error(branch.l,
+                                                      msg(errCasesBranchInvalidVariant, [fmty(type), branch.name])
+                                                      )
+                                                  else if args.length() <> branch.args.length():
+                                                    add-error(branch.l,
+                                                      msg(errCasesPatternNumberFields,
+                                                        [branch.name, args.length(), branch.args.length()])
+                                                      )
+                                                  else:
+                                                    # NOTE(dbp 2013-10-30): We want to check that
+                                                    # branches have the same type.  This is slightly
+                                                    # tricky, so we'll opt for a temporary but dynless solution -
+                                                    # set it to the first branches type, and make
+                                                    # sure all the rest are equal.
+                                                    add-bindings(for map2(bnd from branch.args,
+                                                          argty from args):
+                                                        pair(bnd.id, argty)
+                                                      end,
+                                                      tc(branch.body)^bind(fun(branchty):
+                                                          if branches-ty == dynType: # in first branch
+                                                            branches-ty := branchty
+                                                            return(branchty)
+                                                          else:
+                                                            if branchty == branches-ty:
+                                                              return(branchty)
+                                                            else:
+                                                              add-error(branch.l,
+                                                                msg(errCasesBranchType, [branch.name])
+                                                                )^seq(return(branches-ty))
+                                                            end
+                                                          end
+                                                        end))
+                                                  end
+                                                | nameType(_) =>
+                                                  if not tyequal(ty, type):
+                                                    add-error(branch.l,
+                                                      msg(errCasesBranchInvalidVariant, [fmty(type), branch.name])
+                                                      )^seq(return(dynType))
+                                                  else:
+                                                    tc(branch.body)^bind(fun(branchty):
+                                                        if branches-ty == dynType:
+                                                          branches-ty := branchty
                                                           return(branchty)
                                                         else:
-                                                          add-error(branch.l,
-                                                            msg(errCasesBranchType, [branch.name])
-                                                            )^seq(return(branches-ty))
+                                                          if branchty == branches-ty:
+                                                            return(branchty)
+                                                          else:
+                                                            add-error(branch.l,
+                                                              msg(errCasesBranchType, [branch.name])
+                                                              )^seq(return(branches-ty))
+                                                          end
                                                         end
-                                                      end
-                                                    end))
+                                                      end)
+                                                  end
+                                                | else =>
+                                                  add-error(branch.l,
+                                                    msg(errCasesBranchInvalidVariant, [fmty(type), branch.name])
+                                                    )^seq(dynType)
                                               end
-                                            | nameType(_) =>
-                                              if not tyequal(ty, type):
-                                                add-error(branch.l,
-                                                  msg(errCasesBranchInvalidVariant, [fmty(type), branch.name])
-                                                  )^seq(return(dynType))
-                                              else:
-                                                tc(branch.body)^bind(fun(branchty):
-                                                    if branches-ty == dynType:
-                                                      branches-ty := branchty
-                                                      return(branchty)
-                                                    else:
-                                                      if branchty == branches-ty:
-                                                        return(branchty)
-                                                      else:
-                                                        add-error(branch.l,
-                                                          msg(errCasesBranchType, [branch.name])
-                                                          )^seq(return(branches-ty))
-                                                      end
-                                                    end
-                                                  end)
-                                              end
-                                            | else =>
-                                              add-error(branch.l,
-                                                msg(errCasesBranchInvalidVariant, [fmty(type), branch.name])
-                                                )^seq(dynType)
                                           end
-                                      end
-                                    end))^seq(return(branches-ty))
-                              end)
-                          end
+                                        end))^seq(return(branches-ty))
+                                  end)
+                              end
+                            end)
                         end)
                     end)
                 | else => raise("tc: no case matched for: " + torepr(ast))
