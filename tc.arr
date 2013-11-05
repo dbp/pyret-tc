@@ -111,7 +111,7 @@ data TCstate:
       errors :: List<TypeError>,
       iifs :: List<Pair<String, Type>>,
       env :: List<Pair<String, Type>>,
-      type-env :: List<String>
+      type-env :: List<Pair<String, Type>>
       )
 end
 
@@ -226,10 +226,10 @@ fun add-bindings(binds, mv):
           end))
     end)
 end
-fun add-types(names, mv):
+fun add-types(binds, mv):
   doc: "adds types to the type-env, in the context of a monadic value"
   get-type-env()^bind(fun(old-type-env):
-      put-type-env(names + old-type-env)^seq(
+      put-type-env(binds + old-type-env)^seq(
         mv^bind(fun(val):
             put-type-env(old-type-env)^seq(
               return(val))
@@ -464,11 +464,11 @@ fun get-type(ann :: A.Ann) -> TCST<Type>:
     | a_any => return(baseType(topTag, moreRecord([])))
     | a_name(l, id) =>
       get-type-env()^bind(fun(type-env):
-          if set-get(type-env, id):
-            return(nmty(id))
-          else:
-            add-error(l, msg(errTypeNotDefined, [fmty(nmty(id))]))^seq(
-              return(dynType))
+          cases(Option) map-get(type-env, id):
+            | some(ty) => return(ty)
+            | none =>
+              add-error(l, msg(errTypeNotDefined, [fmty(nmty(id))]))^seq(
+                return(dynType))
           end
         end)
     | a_arrow(l, args, ret) =>
@@ -552,7 +552,7 @@ fun get-bindings(ast :: A.Expr) -> TCST<List<Pair<String, Type>>>:
     #     fun(binds, base): base.chain((_+_), binds) end, envs
     #     )
     | s_datatype(l, name, params, variants, _) =>
-      add-types(params,
+      add-types(params.map(fun(n): pair(n, nmty(n)) end),
         sequence(variants.map(get-variant-bindings(name, params, _)))^bind(fun(vbs):
             return(vbs^concat() + [pair(name, arrowType(params, [anyty], nmty("Bool"), moreRecord([])))])
           end)
@@ -636,7 +636,7 @@ fun get-type-bindings(ast :: A.Expr) -> TCST<List<Pair<String>>>:
       sequence(stmts.map(get-type-bindings))^bind(fun(bs): return(concat(bs)) end)
     | s_user_block(l, block) => get-type-bindings(block)
     | s_datatype(l, name, _, _, _) =>
-      return([name])
+      return([pair(name, nmty(name))])
     | else => return([])
   end
 where:
@@ -644,9 +644,10 @@ where:
     eval(get-type-bindings(A.parse(src,"anonymous-file", { ["check"]: false}).with-types.block), [], [], [], [])
   end
   gtb-src("x = 2") is []
-  gtb-src("datatype Foo: | foo with constructor(self): self end end") is ["Foo"]
+  gtb-src("datatype Foo: | foo with constructor(self): self end end") is [pair("Foo", nmty("Foo"))]
   gtb-src("datatype Foo: | foo with constructor(self): self end end
-           datatype Bar: | bar with constructor(self): self end end") is ["Foo", "Bar"]
+           datatype Bar: | bar with constructor(self): self end end") is
+  [pair("Foo", nmty("Foo")), pair("Bar", nmty("Bar"))]
 end
 
 
@@ -832,24 +833,24 @@ end
 
 
 ################################################################################
-# tc Helper functions.                                                         #
+# tc Helper functions and builtin env and type-env                             #
 ################################################################################
+top-type = baseType(topTag, moreRecord([]))
+list-type = baseType(baseTag("List"), moreRecord([
+      pair("length", methodType([],dynType, [], nmty("Number"), moreRecord([])))
+    ]))
+nothing-type = baseType(baseTag("Nothing"), normalRecord([]))
 
 default-type-env = [
-  "Any",
-  "Bool",
-  "Number",
-  "String",
-  "List",
-  "Nothing"
+  pair("Any", top-type),
+  pair("Bool",  baseType(baseTag("Bool"), moreRecord([]))),
+  pair("Number", baseType(baseTag("Number"), moreRecord([]))),
+  pair("String", baseType(baseTag("String"), moreRecord([]))),
+  pair("List", list-type),
+  pair("Nothing", nothing-type)
 ]
 
 fun tc-main(p, s):
-  top-type = baseType(topTag, moreRecord([]))
-  list-type = baseType(baseTag("List"), moreRecord([
-        pair("length", methodType([],dynType, [], nmty("Number"), moreRecord([])))
-      ]))
-  nothing-type = baseType(baseTag("Nothing"), normalRecord([]))
   env = [
     pair("Any", top-type),
     pair("list", baseType(botTag,
@@ -1005,7 +1006,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                 | s_if(l, branches) => return(dynType)
                 | s_lam(l, ps, args, ann, doc, body, ck) =>
                   # NOTE(dbp 2013-11-03): Check for type shadowing.
-                  add-types(ps,
+                  add-types(ps.map(fun(n): pair(n, nmty(n)) end),
                     get-type(ann)^bind(fun(ret-ty):
                         sequence(args.map(fun(b): get-type(b.ann)^bind(fun(t): return(pair(b.id, t)) end) end))^bind(fun(new-binds):
                             add-bindings(new-binds,
