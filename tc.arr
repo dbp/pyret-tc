@@ -825,48 +825,48 @@ end
 ################################################################################
 # tc Helper functions and builtin env and type-env                             #
 ################################################################################
-fun simple-fnty(args, ret):
-  arrowType([], args.map(nmty), nmty(ret), moreRecord([]))
+fun simple-mty(self, args, ret):
+  methodType([], nmty(self), args.map(nmty), nmty(ret), moreRecord([]))
 end
 default-type-env = [
   pair("Any", anyType),
   pair("Bool",  anonType(moreRecord([]))),
-  pair("Number", anonType(moreRecord([]))),
-    #   normalRecord([
-    #       pair("_plus", simple-fnty(["Number", "Number"], "Number")),
-    #       pair("_add", simple-fnty(["Number", "Number"], "Number")),
-    #       pair("_minus", simple-fnty(["Number", "Number"], "Number")),
-    #       pair("_divide", simple-fnty(["Number", "Number"], "Number")),
-    #       pair("_times", simple-fnty(["Number", "Number"], "Number")),
-    #       pair("_torepr", simple-fnty(["Number"], "String")),
-    #       pair("_equals",
-    #       pair("_lessthan",
-    #       pair("_greaterthan",
-    #       pair("_lessequal",
-    #       pair("_greaterequal",
-    #       pair("tostring",
-    #       pair("modulo", simple-fnty(["Number", "Number"], "Number")),
-    #       pair("truncate",
-    #       pair("abs",
-    #       pair("max",
-    #       pair("min",
-    #       pair("sin",
-    #       pair("cos",
-    #       pair("tan",
-    #       pair("asin",
-    #       pair("acos",
-    #       pair("atan",
-    #       pair("sqr",
-    #       pair("sqrt",
-    #       pair("ceiling",
-    #       pair("floor",
-    #       pair("log",
-    #       pair("exp",
-    #       pair("exact",
-    #       pair("is-integer",
-    #       pair("expt", simple-fnty(["Number", "Number"], "Number"))
-    #     ]))
-    # ),
+  pair("Number",
+      anonType(normalRecord([
+          pair("_plus", simple-mty("Number", ["Number"], "Number")),
+          pair("_add", simple-mty("Number", ["Number"], "Number")),
+          pair("_minus", simple-mty("Number", ["Number"], "Number")),
+          pair("_divide", simple-mty("Number", ["Number"], "Number")),
+          pair("_times", simple-mty("Number", ["Number"], "Number")),
+          pair("_torepr", simple-mty("Number", [], "String")),
+          pair("_equals", simple-mty("Number", ["Any"], "Bool")),
+          pair("_lessthan", simple-mty("Number", ["Number"], "Bool")),
+          pair("_greaterthan", simple-mty("Number", ["Number"], "Bool")),
+          pair("_lessequal", simple-mty("Number", ["Number"], "Bool")),
+          pair("_greaterequal", simple-mty("Number", ["Number"], "Bool")),
+          pair("tostring", simple-mty("Number", [], "String")),
+          pair("modulo", simple-mty("Number", ["Number"], "Number")),
+          pair("truncate", simple-mty("Number", [], "Number")),
+          pair("abs", simple-mty("Number", [], "Number")),
+          pair("max", simple-mty("Number", ["Number"], "Number")),
+          pair("min", simple-mty("Number", ["Number"], "Number")),
+          pair("sin", simple-mty("Number", [], "Number")),
+          pair("cos", simple-mty("Number", [], "Number")),
+          pair("tan", simple-mty("Number", [], "Number")),
+          pair("asin", simple-mty("Number", [], "Number")),
+          pair("acos", simple-mty("Number", [], "Number")),
+          pair("atan", simple-mty("Number", [], "Number")),
+          pair("sqr", simple-mty("Number", [], "Number")),
+          pair("sqrt", simple-mty("Number", [], "Number")),
+          pair("ceiling", simple-mty("Number", [], "Number")),
+          pair("floor", simple-mty("Number", [], "Number")),
+          pair("log", simple-mty("Number", [], "Number")),
+          pair("exp", simple-mty("Number", [], "Number")),
+          pair("exact", simple-mty("Number", [], "Number")),
+          pair("is-integer", simple-mty("Number", [], "Bool")),
+          pair("expt", simple-mty("Number", ["Number"], "Number"))
+        ]))
+    ),
   pair("String", anonType(moreRecord([]))),
   pair("List", anonType(moreRecord([
       pair("length", methodType([],dynType, [], nmty("Number"), moreRecord([])))
