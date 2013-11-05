@@ -1009,7 +1009,25 @@ default-type-env = [
           pair("expt", simple-mty("Number", ["Number"], "Number"))
         ])))
     ),
-  pair("String", typeNominal(anonType(moreRecord([])))),
+  pair("String", typeNominal(anonType(normalRecord([
+            pair("_plus", simple-mty("String", ["String"], "String")),
+            pair("_lessequal", simple-mty("String", ["String"], "Bool")),
+            pair("_lessthan", simple-mty("String", ["String"], "Bool")),
+            pair("_greaterthan", simple-mty("String", ["String"], "Bool")),
+            pair("_greaterequal", simple-mty("String", ["String"], "Bool")),
+            pair("_equals", simple-mty("String", ["Any"], "Bool")),
+            pair("append", simple-mty("String", ["String"], "String")),
+            pair("contains", simple-mty("String", ["String"], "Bool")),
+            pair("substring", simple-mty("String", ["Number", "Number"], "String")),
+            pair("char-at", simple-mty("String", ["Number"], "String")),
+            pair("repeat", simple-mty("String", ["Number"], "String")),
+            pair("length", simple-mty("String", [], "Number")),
+            pair("to-lower", simple-mty("String", [], "String")),
+            pair("to-upper", simple-mty("String", [], "String")),
+            pair("tonumber", simple-mty("String", [], "Number")),
+            pair("tostring", simple-mty("String", [], "String")),
+            pair("_torepr", simple-mty("String", [], "String"))
+          ])))),
   pair("List", typeNominal(anonType(moreRecord([
       pair("length", methodType([],dynType, [], nmty("Number"), moreRecord([])))
     ])))),
