@@ -264,20 +264,16 @@ end
 
 data TCError:
   | errAssignWrongType(id, bindty, valty) with: tostring(self):
-      "The identifier " + self.id + " was defined to have type " + self.bindty + ",
-      but assigned a value of an incompatible type: " + self.valty + "."
+      "The identifier " + self.id + " was defined to have type " + self.bindty + ", but assigned a value of an incompatible type: " + self.valty + "."
     end
   | errFunctionInferredIncompatibleReturn(bodyty, retty) with: tostring(self):
-      "The body of the function has type " + self.bodyty + ", which is incompatible with the return
-      type, " + self.retty + ", inferred based on tests."
+      "The body of the function has type " + self.bodyty + ", which is incompatible with the return type, " + self.retty + ", inferred based on tests."
     end
   | errFunctionAnnIncompatibleReturn(bodyty, retty) with: tostring(self):
-      "The body of the function has type " + self.bodyty + ", which is incompatible with the return
-      type specified in annotations as " + self.retty + "."
+      "The body of the function has type " + self.bodyty + ", which is incompatible with the return type specified in annotations as " + self.retty + "."
     end
   | errArityMismatch(expected, given) with: tostring(self):
-      "Arity mismatch: function expected " + tostring(self.expected) + " arguments, but was
-      passed " + tostring(self.given) + "."
+      "Arity mismatch: function expected " + tostring(self.expected) + " arguments, but was passed " + tostring(self.given) + "."
     end
   | errArgumentBadType(position, expected, given) with: tostring(self):
       "The " + ordinalize(self.position) + " argument was expected to be of type " + self.expected + ", but was the incompatible type " + self.given + "."
@@ -295,19 +291,16 @@ data TCError:
       "The value in cases expression should have type " + self.expected + ", but has incompatible type " + self.given + "."
     end
   | errCasesBranchInvalidVariant(type, name) with: tostring(self):
-      "The branch " + self.name + " in the cases expression is
-      not a valid variant of the data type " + self.type + "."
+      "The branch " + self.name + " in the cases expression is not a valid variant of the data type " + self.type + "."
     end
   | errCasesPatternNumberFields(name, expected, given) with: tostring(self):
       "The variant pattern for cases branch " + self.name + " should have " + tostring(self.expected) + " fields, not " + tostring(self.given)  + "."
     end
   | errCasesBranchType(type1, type2, name) with: tostring(self):
-      "All branches of a cases expression must evaluate
-      to the same type. Found branches with type " + self.type1 +", which is incompatible with the type of branch " + self.name + ", which has type " + self.type2 + "."
+      "All branches of a cases expression must evaluate to the same type. Found branches with type " + self.type1 +", which is incompatible with the type of branch " + self.name + ", which has type " + self.type2 + "."
     end
   | errTypeNotDefined(type) with: tostring(self):
-      "The " + self.type + " type is not defined. Did you forget to
-      import, or forget to add the type parameter?"
+      "The " + self.type + " type is not defined. Did you forget to import, or forget to add the type parameter?"
     end
   | errIfTestNotBool(ty) with: tostring(self):
       "The branch of the if expression has type " + self.ty + ", which is not a Bool."
@@ -1069,15 +1062,27 @@ fun tc-main(p, s):
             pair("link", arrowType([],[anyType, nmty("List")], nmty("List"), moreRecord([]))),
             pair("empty", nmty("List"))
           ]))),
-    pair("builtins", anonType(
-        moreRecord([]))),
+    pair("builtins", anonType(moreRecord([]))),
+    pair("error", anonType(moreRecord([]))),
     pair("link", arrowType([],[anyType, nmty("List")], nmty("List"), moreRecord([]))),
     pair("empty", nmty("List")),
     pair("nothing", nmty("Nothing")),
+    pair("some", arrowType([], [anyType], nmty("Option"), moreRecord([]))),
+    pair("none", nmty("Option")),
     pair("true", nmty("Bool")),
     pair("false", nmty("Bool")),
     pair("print", arrowType([], [anyType], nmty("Nothing"), moreRecord([]))),
-    pair("raise", arrowType([], [anyType], anyType, moreRecord([])))
+    pair("tostring", arrowType([], [anyType], nmty("String"), moreRecord([]))),
+    pair("fold", dynType),
+    pair("map2", dynType),
+    pair("raise", arrowType([], [anyType], anyType, moreRecord([]))),
+    pair("Racket", dynType),
+    pair("List", arrowType([], [anyType], nmty("Bool"), moreRecord([]))),
+    pair("String", arrowType([], [anyType], nmty("Bool"), moreRecord([]))),
+    pair("Function", arrowType([], [anyType], nmty("Bool"), moreRecord([]))),
+    pair("Bool", arrowType([], [anyType], nmty("Bool"), moreRecord([]))),
+    pair("Number", arrowType([], [anyType], nmty("Bool"), moreRecord([]))),
+    pair("Nothing", arrowType([], [anyType], nmty("Bool"), moreRecord([])))
   ]
   stx = s^A.parse(p, { ["check"]: false})
   # NOTE(dbp 2013-11-03): This is sort of crummy. Need to get bindings first, for use
@@ -1520,6 +1525,10 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                 | s_cases(l, type, val, branches) => tc-cases(l, type, val, branches, anyType)
                 | s_cases_else(l, type, val, branches, _else) =>
                   tc(_else)^bind(fun(elsety): tc-cases(l, type, val, branches, elsety) end)
+                  # NOTE(dbp 2013-11-05): Since we type check
+                  # pre-desugar code inside 'is' tests for inference, we need
+                  # any ast nodes that could appear there (in theory, any surface syntax...)
+                | s_list(l, values) => return(nmty("List"))
                 | else => raise("tc: no case matched for: " + torepr(ast))
               end
               )

@@ -15,6 +15,10 @@ Which will print out a report from type checking, listing any errors
 detected, and any top level functions that it inferred types for based
 on tests.
 
+**NOTE**: It is currently quite slow. On my recent desktop i7, running the
+  whole test suite (50 small programs) takes about 40 seconds, and running
+  the type checker on itself takes 68 minutes. Yes, minutes. (eek!).
+
 Feedback welcome; though it is definitely still a work in progress
 (so, "it doesn't catch all type errors" isn't useful feedback. A
 specific error it missed, on the other hand, is.)
