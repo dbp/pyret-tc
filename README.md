@@ -18,3 +18,19 @@ on tests.
 Feedback welcome; though it is definitely still a work in progress
 (so, "it doesn't catch all type errors" isn't useful feedback. A
 specific error it missed, on the other hand, is.)
+
+
+# Running tests
+
+If you want to run the type checkers test suite (all the programs in
+the `tests` directory, as well as unit tests in `tc.arr`), run:
+
+    raco pyret tc.arr tests
+
+If you want to only run the unit tests:
+
+    raco pyret tc.arr
+
+And to run a specific file test:
+
+    raco pyret tc.arr tests/basic1.arr
