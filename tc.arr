@@ -1439,8 +1439,8 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                                     return(dynType)
                                   else if is-nameType(ret-type) and params.member(ret-type.name):
                                     cases(Option) map-get(param-inst, ret-type):
-                                      | nothing =>
-                                        raise("tc: type checked a body to return a type parameter not present in the arguments, which shouldn't be possible.")
+                                      | none =>
+                                        raise("tc: type checked a body at " + torepr(l) + " to return a type parameter not present in the arguments, which shouldn't be possible.")
                                       | some(t) => return(t)
                                     end
                                   else:
