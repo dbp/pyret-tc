@@ -474,6 +474,18 @@ where:
   tyequal(arrowType([],[], nmty("A"), normalRecord([])), arrowType([],[], nmty("A"), moreRecord([pair("b", nmty("Number"))]))) is false
 end
 
+fun tycompat(t1 :: Type, t2 :: Type) -> Bool:
+  doc: "equality with Dyn"
+  cases(Type) t1:
+    | dynType => true
+    | else =>
+      cases(Type) t2:
+        | dynType => true
+        | else => t1 == t2
+      end
+  end
+end
+
 fun get-type(ann :: A.Ann) -> TCST<Type>:
   cases(A.Ann) ann:
     | a_blank => return(dynType)
@@ -805,6 +817,24 @@ fun subtype(l :: Loc, _child :: Type, _parent :: Type) -> TCST<Bool>:
       | nameType(parentname) =>
         cases(Type) child:
           | dynType => return(true)
+          | anyType =>
+            if not recur:
+              return(false)
+            else:
+              get-type-env()^bind(fun(type-env):
+                  cases(Option) map-get(type-env, parentname):
+                    | none =>
+                      add-error(l, msg(errTypeNotDefined(fmty(nmty(parentname)))))^seq(
+                        return(false))
+                    | some(parentbind) =>
+                      cases(TypeBinding) parentbind:
+                        | typeNominal(_) => return(false)
+                        | typeAlias(parentty) =>
+                          return(parentty == anyType)
+                      end
+                  end
+                end)
+            end
           | nameType(childname) =>
             if parentname == childname:
               return(true)
@@ -943,6 +973,8 @@ where:
   eval(subtype(l, methodType([],numType, [anyType], numType, moreRecord([])),
       methodType([],anyType, [anyType], anyType, moreRecord([]))), [], [], [], default-type-env) is false
 
+  eval(subtype(l, anyType, nmty("Any")), [], [], [], default-type-env) is true
+
 end
 
 
@@ -1033,7 +1065,7 @@ default-type-env = [
             pair("partition", simple-mty("List", [arrowType([], [nmty("Any")], nmty("Bool"), moreRecord([]))], anonType(normalRecord([pair("is-true", nmty("List")), pair("is-false", nmty("List"))])))),
             pair("foldr", simple-mty("List", [arrowType([], [dynType, dynType], dynType, moreRecord([])), dynType], dynType)),
             pair("foldl", simple-mty("List", [arrowType([], [dynType, dynType], dynType, moreRecord([])), dynType], dynType)),
-            pair("member",simple-mty("List", ["Any"], "Bool")),
+            pair("member", simple-mty("List", ["Any"], "Bool")),
             pair("append", simple-mty("List", ["List"], "List")),
             pair("last", simple-mty("List", [], dynType)),
             pair("take", simple-mty("List", ["Number"], "List")),
@@ -1180,7 +1212,7 @@ fun tc-cases(l :: Loc, _type :: A.Ann, val :: A.Expr, branches :: List<A.CasesBr
                                       if branches-ty == anyType: # in first branch
                                         return(branchty)
                                       else:
-                                        if branchty == branches-ty:
+                                        if tycompat(branchty, branches-ty):
                                           return(branchty)
                                         else:
                                           add-error(branch.l,
@@ -1200,7 +1232,7 @@ fun tc-cases(l :: Loc, _type :: A.Ann, val :: A.Expr, branches :: List<A.CasesBr
                                     if branches-ty == anyType:
                                       return(branchty)
                                     else:
-                                      if branchty == branches-ty:
+                                      if tycompat(branchty, branches-ty):
                                         return(branchty)
                                       else:
                                         add-error(branch.l,
@@ -1316,32 +1348,30 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                 | s_assign(l, id, val) => return(dynType)
                 | s_if_else(l, branches, elsebranch) =>
                   tc(elsebranch)^bind(fun(_branches-ty):
-                      var branches-ty = _branches-ty
                       sequence(branches.map(fun(branch):
                             tc(branch.test)^bind(fun(ty):
-                                if tyequal(nmty("Bool"), ty):
+                                if tycompat(nmty("Bool"), ty):
                                   return(nothing)
                                 else:
                                   add-error(branch.l, msg(errIfTestNotBool(fmty(ty))))
                                 end
                               end)
                           end))^seq(
-                        sequence(branches.map(fun(branch):
-                              tc(branch.body)^bind(fun(branchty):
-                                  if branches-ty == anyType: # was no else branch
-                                    branches-ty := branchty
+                        (for foldm(branches-ty from _branches-ty, branch from branches):
+                            tc(branch.body)^bind(fun(branchty):
+                                if branches-ty == anyType: # was no else branch
+                                  return(branchty)
+                                else:
+                                  if tycompat(branchty, branches-ty):
                                     return(branchty)
                                   else:
-                                    if branchty == branches-ty:
-                                      return(branchty)
-                                    else:
-                                      add-error(branch.l,
-                                        msg(errIfBranchType(fmty(branches-ty), fmty(branchty)))
-                                        )^seq(return(branches-ty))
-                                    end
+                                    add-error(branch.l,
+                                      msg(errIfBranchType(fmty(branches-ty), fmty(branchty)))
+                                      )^seq(return(branches-ty))
                                   end
-                                end)
-                            end)))^seq(return(branches-ty))
+                                end
+                              end)
+                          end))
                     end)
                 | s_lam(l, ps, args, ann, doc, body, ck) =>
                   # NOTE(dbp 2013-11-03): Check for type shadowing.
