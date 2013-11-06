@@ -71,6 +71,8 @@ sharing:
         and (ret == other.ret) and (record == other.record)
     end
   end
+where:
+  anyType == anyType is true
 end
 
 fun <K,V> Map(o): List(o) end
@@ -329,6 +331,7 @@ fun fmty(type :: Type) -> String:
   end
   cases(Type) type:
     | dynType => "Dyn*"
+    | anyType => "Any"
     | nameType(name) => name
     | anonType(rec) =>
       cases(RecordType) rec:
@@ -1124,6 +1127,97 @@ fun tc-member(ast :: A.Member) -> TCST<Option<Pair<String,Type>>>:
   end
 end
 
+fun tc-cases(l :: Loc, _type :: A.Ann, val :: A.Expr, branches :: List<A.CasesBranch>, _branches-ty :: Type) -> TCST<Type>:
+  get-type(_type)^bind(
+    fun(type):
+      tc(val)^bind(
+        fun(val-ty):
+          subtype(l, type, val-ty)^bind(fun(st):
+              if not st:
+                add-error(l,
+                  msg(errCasesValueBadType(fmty(type), fmty(val-ty)))
+                  )^seq(return(dynType))
+              else:
+                get-env()^bind(
+                  fun(env):
+                    for foldm(branches-ty from _branches-ty, branch from branches):
+                      # TODO(dbp 2013-10-30): Need to have a data-env, so we can
+                      # pick up non-bound constructors.
+                      cases(Option) map-get(env, branch.name):
+                        | none => add-error(branch.l,
+                            msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
+                            )^seq(return(dynType))
+                        | some(ty) =>
+                          cases(Type) ty:
+                            | arrowType(params, args, ret, rec) =>
+                              # NOTE(dbp 2013-10-30): No subtyping - cases type
+                              # must match constructors exactly (modulo records)
+                              if not tyequal(ret, type):
+                                add-error(branch.l,
+                                  msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
+                                  )^seq(return(dynType))
+                              else if args.length() <> branch.args.length():
+                                add-error(branch.l,
+                                  msg(errCasesPatternNumberFields(branch.name, args.length(), branch.args.length()))
+                                  )^seq(return(dynType))
+                              else:
+                                # NOTE(dbp 2013-10-30): We want to check that
+                                # branches have the same type.  This is slightly
+                                # tricky, so we'll opt for a temporary but dynless solution -
+                                # set it to the first branches type, and make
+                                # sure all the rest are equal.
+                                add-bindings(for map2(bnd from branch.args,
+                                      argty from args):
+                                    pair(bnd.id, argty)
+                                  end,
+                                  tc(branch.body)^bind(fun(branchty):
+                                      if branches-ty == anyType: # in first branch
+                                        return(branchty)
+                                      else:
+                                        if branchty == branches-ty:
+                                          return(branchty)
+                                        else:
+                                          add-error(branch.l,
+                                            msg(errCasesBranchType(fmty(branches-ty), fmty(branchty), branch.name))
+                                            )^seq(return(dynType))
+                                        end
+                                      end
+                                    end))
+                              end
+                            | nameType(_) =>
+                              if not tyequal(ty, type):
+                                add-error(branch.l,
+                                  msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
+                                  )^seq(return(dynType))
+                              else:
+                                tc(branch.body)^bind(fun(branchty):
+                                    if branches-ty == anyType:
+                                      return(branchty)
+                                    else:
+                                      if branchty == branches-ty:
+                                        return(branchty)
+                                      else:
+                                        add-error(branch.l,
+                                          msg(errCasesBranchType(fmty(branches-ty), fmty(branchty), branch.name))
+                                          )^seq(return(branches-ty))
+                                      end
+                                    end
+                                  end)
+                              end
+                            | else =>
+                              add-error(branch.l,
+                                msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
+                                )^seq(dynType)
+                          end
+                      end
+                    end
+                  end)
+              end
+            end)
+        end)
+    end)
+end
+
 
 ################################################################################
 # Main typechecking function.                                                  #
@@ -1222,7 +1316,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                                 if tyequal(nmty("Bool"), ty):
                                   return(nothing)
                                 else:
-                                  add-error(branch.l, msg(errIfTestNotBool(ty)))
+                                  add-error(branch.l, msg(errIfTestNotBool(fmty(ty))))
                                 end
                               end)
                           end))^seq(
@@ -1423,98 +1517,9 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                 | s_datatype(l, name, params, variants, check) =>
                   # NOTE(dbp 2013-10-30): Should statements have type nothing?
                   return(nmty("Nothing"))
-                | s_cases(l, _type, val, branches) =>
-                  get-type(_type)^bind(
-                    fun(type):
-                      tc(val)^bind(
-                        fun(val-ty):
-                          subtype(l, type, val-ty)^bind(fun(st):
-                              if not st:
-                                add-error(l,
-                                  msg(errCasesValueBadType(fmty(type), fmty(val-ty)))
-                                  )^seq(return(dynType))
-                              else:
-                                get-env()^bind(
-                                  fun(env):
-                                    var branches-ty = dynType
-                                    sequence(branches.map(fun(branch):
-                                          # TODO(dbp 2013-10-30): Need to have a data-env, so we can
-                                          # pick up non-bound constructors.
-                                          cases(Option) map-get(env, branch.name):
-                                            | none => add-error(branch.l,
-                                                msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
-                                                )
-                                            | some(ty) =>
-                                              cases(Type) ty:
-                                                | arrowType(params, args, ret, rec) =>
-                                                  # NOTE(dbp 2013-10-30): No subtyping - cases type
-                                                  # must match constructors exactly (modulo records)
-                                                  if not tyequal(ret, type):
-                                                    add-error(branch.l,
-                                                      msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
-                                                      )
-                                                  else if args.length() <> branch.args.length():
-                                                    add-error(branch.l,
-                                                      msg(errCasesPatternNumberFields(branch.name, args.length(), branch.args.length()))
-                                                      )
-                                                  else:
-                                                    # NOTE(dbp 2013-10-30): We want to check that
-                                                    # branches have the same type.  This is slightly
-                                                    # tricky, so we'll opt for a temporary but dynless solution -
-                                                    # set it to the first branches type, and make
-                                                    # sure all the rest are equal.
-                                                    add-bindings(for map2(bnd from branch.args,
-                                                          argty from args):
-                                                        pair(bnd.id, argty)
-                                                      end,
-                                                      tc(branch.body)^bind(fun(branchty):
-                                                          if branches-ty == dynType: # in first branch
-                                                            branches-ty := branchty
-                                                            return(branchty)
-                                                          else:
-                                                            if branchty == branches-ty:
-                                                              return(branchty)
-                                                            else:
-                                                              add-error(branch.l,
-                                                                msg(errCasesBranchType(fmty(branches-ty), fmty(branchty), branch.name))
-                                                                )^seq(return(branches-ty))
-                                                            end
-                                                          end
-                                                        end))
-                                                  end
-                                                | nameType(_) =>
-                                                  if not tyequal(ty, type):
-                                                    add-error(branch.l,
-                                                      msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
-                                                      )^seq(return(dynType))
-                                                  else:
-                                                    tc(branch.body)^bind(fun(branchty):
-                                                        if branches-ty == dynType:
-                                                          branches-ty := branchty
-                                                          return(branchty)
-                                                        else:
-                                                          if branchty == branches-ty:
-                                                            return(branchty)
-                                                          else:
-                                                            add-error(branch.l,
-                                                              msg(errCasesBranchType(fmty(branches-ty), fmty(branchty), branch.name))
-                                                              )^seq(return(branches-ty))
-                                                          end
-                                                        end
-                                                      end)
-                                                  end
-                                                | else =>
-                                                  add-error(branch.l,
-                                                    msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
-                                                    )^seq(dynType)
-                                              end
-                                          end
-                                        end))^seq(return(branches-ty))
-                                  end)
-                              end
-                            end)
-                        end)
-                    end)
+                | s_cases(l, type, val, branches) => tc-cases(l, type, val, branches, anyType)
+                | s_cases_else(l, type, val, branches, _else) =>
+                  tc(_else)^bind(fun(elsety): tc-cases(l, type, val, branches, elsety) end)
                 | else => raise("tc: no case matched for: " + torepr(ast))
               end
               )
