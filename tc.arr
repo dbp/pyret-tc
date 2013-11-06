@@ -1073,6 +1073,7 @@ fun tc-main(p, s):
     pair("false", nmty("Bool")),
     pair("print", arrowType([], [anyType], nmty("Nothing"), moreRecord([]))),
     pair("tostring", arrowType([], [anyType], nmty("String"), moreRecord([]))),
+    pair("torepr", arrowType([], [anyType], nmty("String"), moreRecord([]))),
     pair("fold", dynType),
     pair("map2", dynType),
     pair("raise", arrowType([], [anyType], anyType, moreRecord([]))),
