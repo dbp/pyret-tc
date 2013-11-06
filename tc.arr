@@ -303,7 +303,7 @@ data TCError:
       "The " + self.type + " type is not defined. Did you forget to import, or forget to add the type parameter?"
     end
   | errIfTestNotBool(ty) with: tostring(self):
-      "The branch of the if expression has type " + self.ty + ", which is not a Bool."
+      "The test of the if expression has type " + self.ty + ", which is not a Bool."
     end
   | errIfBranchType(type1, type2) with: tostring(self):
       "All branches of an if expression must evaluate to the same type. Found branches with type " + self.type1 + " which is incompatible with this branch, which has type " + self.type2 + "."
