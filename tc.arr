@@ -53,6 +53,7 @@ data Type:
   | anonType(record :: RecordType)
   | arrowType(params :: List<String>, args :: List<Type>, ret :: Type, record :: RecordType)
   | methodType(params :: List<String>, self :: Type, args :: List<Type>, ret :: Type, record :: RecordType)
+  | appType(params :: List<String>, name :: String, args :: List<Type>)
 sharing:
   _equals(self, other):
     cases(Type) self:
@@ -69,10 +70,14 @@ sharing:
         is-methodType(other) and (params == other.params) and (mself == other.self)
         and (args == other.args)
         and (ret == other.ret) and (record == other.record)
+      | appType(params, name, args) =>
+        is-appType(other) and (params == other.params) and (name == other.name)
+        and (args == other.args)
     end
   end
 where:
   anyType == anyType is true
+  nameType("Foo") == appType([], "Foo", []) is false
 end
 
 fun <K,V> Map(o): List(o) end
@@ -327,7 +332,7 @@ fun fmty(type :: Type) -> String:
   end
   cases(Type) type:
     | dynType => "Dyn*"
-    | anyType => "Any"
+    | anyType => "Any*"
     | nameType(name) => name
     | anonType(rec) =>
       cases(RecordType) rec:
@@ -338,7 +343,17 @@ fun fmty(type :: Type) -> String:
       end
     | arrowType(params, args, ret, rec) => fmarrow(params, args, ret)
     | methodType(params, self, args, ret, rec) => fmarrow(params, [self]+args, ret)
+    | appType(params, name, args) =>
+      if params == []:
+        name + "<" + args.map(fmty).join-str(", ") + ">"
+      else:
+        name + "[" + params.join-str(", ") + "]" + "<" + args.map(fmty).join-str(", ") + ">"
+      end
   end
+where:
+  fmty(appType([], "Option", [nmty("Element")])) is "Option<Element>"
+  fmty(appType(["T"], "List", [nmty("T")])) is "List[T]<T>"
+  fmty(appType(["T"], "Either", [nmty("T"), nmty("U")])) is "Either[T]<T, U>"
 end
 
 fun pretty-error(ep :: Pair<Loc, String>) -> String:
@@ -415,6 +430,10 @@ fun nmty(name :: String) -> Type:
   nameType(name)
 end
 
+fun appty(name :: String, args :: List<String>) -> Type:
+  appType([], name, args.map(nmty))
+end
+
 fun tyequal(t1 :: Type, t2 :: Type) -> Bool:
   doc: "Type equality, allowing for moreRecords containing unknown additional fields."
   fun recequal(r1 :: RecordType, r2 :: RecordType) -> Bool:
@@ -462,7 +481,14 @@ fun tyequal(t1 :: Type, t2 :: Type) -> Bool:
           (params1 == params2) and (self1 == self2) and (args1 == args2) and (ret1 == ret2) and recequal(rec1, rec2)
         | else => false
       end
+    | appType(params1, name1, args1) =>
+      cases(Type) t2:
+        | appType(params2, name2, args2) =>
+          (params1 == params2) and (name1 == name2) and (args1 == args2)
+        | else => false
+      end
     | dynType => t2 == dynType
+    | anyType => t2 == anyType
   end
 where:
   tyequal(nmty("A"), nmty("A")) is true
@@ -495,8 +521,12 @@ fun get-type(ann :: A.Ann) -> TCST<Type>:
     | a_any => return(anyType)
     | a_name(l, id) =>
       get-type-env()^bind(fun(type-env):
-          cases(Option) map-get(type-env, id):
-            | some(_) => return(nmty(id))
+          cases(Option) map-get(type-env, nmty(id)):
+            | some(tyb) =>
+              cases(TypeBinding) tyb:
+                | typeNominal(_) => return(nmty(id))
+                | typeAlias(ty) => return(ty)
+              end
             | none =>
               add-error(l, msg(errTypeNotDefined(fmty(nmty(id)))))^seq(
                 return(dynType))
@@ -517,8 +547,15 @@ fun get-type(ann :: A.Ann) -> TCST<Type>:
         fun(fieldsty):
           return(anonType(normalRecord(fieldsty)))
         end)
-    | a_app(l, ann1, args) => get-type(ann1)
-    | a_dot(l, obj, field) => add-error(l, errAnnDotNotSupported(obj, field))^return(dynType)
+    | a_app(l, ann1, args) =>
+      cases(A.Ann) ann1:
+        | a_name(l1, id) => sequence(args.map(get-type))^bind(fun(argtys):
+              return(appType([], id, argtys))
+            end)
+        | a_dot(l1,obj,field) => add-error(l1, errAnnDotNotSupported(obj, field))^seq(return(dynType))
+        | else => raise("tc: got an ann at " + torepr(l) + " inside of a_app that is not an a_name or a_dot, which shouldn't be able to happen: " + torepr(ann1))
+      end
+    | a_dot(l, obj, field) => add-error(l, errAnnDotNotSupported(obj, field))^seq(return(dynType))
     | a_pred(l, ann1, _) => get-type(ann1)
   end
 end
@@ -554,13 +591,19 @@ end
 # Binding extraction, letrec behavior, datatype bindings.                      #
 ################################################################################
 
+fun bind-params(params, mv) -> TCST:
+  add-types(params.map(fun(n):
+      pair(nmty(n), typeNominal(anonType(normalRecord([]))))
+      end), mv)
+end
+
 fun get-bindings(ast :: A.Expr) -> TCST<List<Pair<String, Type>>>:
   doc: "This function implements letrec behavior."
   fun name-val-binds(name, val):
     if A.is-a_blank(name.ann):
       cases(A.Expr) val:
         | s_lam(l1, ps, args, ann, doc, body, ck) =>
-          add-types(ps.map(fun(n): pair(n, typeNominal(nmty(n))) end),
+          bind-params(ps,
             sequence(args.map(fun(b): get-type(b.ann) end))^bind(fun(arg-tys):
                 get-type(ann)^bind(fun(ret-ty):
                     return([pair(name.id, arrowType(ps, arg-tys, ret-ty, moreRecord([])))])
@@ -595,7 +638,7 @@ fun get-bindings(ast :: A.Expr) -> TCST<List<Pair<String, Type>>>:
     #     fun(binds, base): base.chain((_+_), binds) end, envs
     #     )
     | s_datatype(l, name, params, variants, _) =>
-      add-types(params.map(fun(n): pair(n, typeNominal(nmty(n))) end),
+      bind-params(params,
         sequence(variants.map(get-variant-bindings(name, params, _)))^bind(fun(vbs):
             return(vbs^concat() + [pair(name, arrowType(params, [anyType], nmty("Bool"), moreRecord([])))])
           end)
@@ -676,8 +719,13 @@ fun get-type-bindings(ast :: A.Expr) -> TCST<List<Pair<String>>>:
     | s_block(l, stmts) =>
       sequence(stmts.map(get-type-bindings))^bind(fun(bs): return(concat(bs)) end)
     | s_user_block(l, block) => get-type-bindings(block)
-    | s_datatype(l, name, _, _, _) =>
-      return([pair(name, typeNominal(nmty(name)))])
+    | s_datatype(l, name, params, _, _) =>
+      if params == []:
+        return([pair(nmty(name), typeNominal(anonType(moreRecord([]))))])
+      else:
+        return([pair(nmty(name), typeAlias(appType(params, name, params.map(nmty)))),
+            pair(appty(name, params), typeNominal(anonType(moreRecord([]))))])
+      end
     | else => return([])
   end
 where:
@@ -685,10 +733,14 @@ where:
     eval(get-type-bindings(A.parse(src,"anonymous-file", { ["check"]: false}).with-types.block), [], [], [], [])
   end
   gtb-src("x = 2") is []
-  gtb-src("datatype Foo: | foo with constructor(self): self end end") is [pair("Foo", typeNominal(nmty("Foo")))]
+  gtb-src("datatype Foo: | foo with constructor(self): self end end") is [pair(nmty("Foo"), typeNominal(anonType(moreRecord([]))))]
   gtb-src("datatype Foo: | foo with constructor(self): self end end
            datatype Bar: | bar with constructor(self): self end end") is
-  [pair("Foo", typeNominal(nmty("Foo"))), pair("Bar", typeNominal(nmty("Bar")))]
+  [pair(nmty("Foo"), typeNominal(anonType(moreRecord([])))), pair(nmty("Bar"), typeNominal(anonType(moreRecord([]))))]
+
+  gtb-src("datatype Foo<T>: | foo with constructor(self): self end end") is
+  [pair(nmty("Foo"), typeAlias(appType(["T"], "Foo", [nmty("T")]))),
+    pair(appty("Foo", ["T"]), typeNominal(anonType(moreRecord([]))))]
 end
 
 
@@ -837,9 +889,9 @@ fun subtype(l :: Loc, _child :: Type, _parent :: Type) -> TCST<Bool>:
               return(false)
             else:
               get-type-env()^bind(fun(type-env):
-                  cases(Option) map-get(type-env, parentname):
+                  cases(Option) map-get(type-env, parent):
                     | none =>
-                      add-error(l, msg(errTypeNotDefined(fmty(nmty(parentname)))))^seq(
+                      add-error(l, msg(errTypeNotDefined(fmty(parent))))^seq(
                         return(false))
                     | some(parentbind) =>
                       cases(TypeBinding) parentbind:
@@ -858,16 +910,16 @@ fun subtype(l :: Loc, _child :: Type, _parent :: Type) -> TCST<Bool>:
                 return(false)
               else:
                 get-type-env()^bind(fun(type-env):
-                    cases(Option) map-get(type-env, parentname):
+                    cases(Option) map-get(type-env, parent):
                       | none =>
-                        add-error(l, msg(errTypeNotDefined(fmty(nmty(parentname)))))^seq(
+                        add-error(l, msg(errTypeNotDefined(fmty(parent))))^seq(
                           return(false))
                       | some(parentbind) =>
                         cases(TypeBinding) parentbind:
                           | typeNominal(_) =>
-                            cases(Option) map-get(type-env, childname):
+                            cases(Option) map-get(type-env, child):
                               | none =>
-                                add-error(l, msg(errTypeNotDefined(fmty(nmty(childname)))))^seq(
+                                add-error(l, msg(errTypeNotDefined(fmty(child))))^seq(
                                   return(false))
                               | some(childbind) =>
                                 cases(TypeBinding) childbind:
@@ -877,9 +929,9 @@ fun subtype(l :: Loc, _child :: Type, _parent :: Type) -> TCST<Bool>:
                                 end
                             end
                           | typeAlias(parentty) =>
-                            cases(Option) map-get(type-env, childname):
+                            cases(Option) map-get(type-env, child):
                               | none =>
-                                add-error(l, msg(errTypeNotDefined(fmty(nmty(childname)))))^seq(
+                                add-error(l, msg(errTypeNotDefined(fmty(child))))^seq(
                                   return(false))
                               | some(childbind) =>
                                 cases(TypeBinding) childbind:
@@ -893,14 +945,14 @@ fun subtype(l :: Loc, _child :: Type, _parent :: Type) -> TCST<Bool>:
                   end)
               end
             end
-          | anonType(childrecord) =>
+          | else =>
             if not recur:
               return(false)
             else:
               get-type-env()^bind(fun(type-env):
-                  cases(Option) map-get(type-env, parentname):
+                  cases(Option) map-get(type-env, parent):
                     | none =>
-                      add-error(l, msg(errTypeNotDefined(fmty(nmty(parentname)))))^seq(
+                      add-error(l, msg(errTypeNotDefined(fmty(parent))))^seq(
                         return(dynType))
                     | some(parentbind) =>
                       cases(TypeBinding) parentbind:
@@ -911,7 +963,6 @@ fun subtype(l :: Loc, _child :: Type, _parent :: Type) -> TCST<Bool>:
                   end
                 end)
             end
-          | else => return(false)
         end
       | anonType(parentrecord) =>
         cases(Type) child:
@@ -923,9 +974,48 @@ fun subtype(l :: Loc, _child :: Type, _parent :: Type) -> TCST<Bool>:
               return(false)
             else:
               get-type-env()^bind(fun(type-env):
-                  cases(Option) map-get(type-env, childname):
+                  cases(Option) map-get(type-env, child):
                     | none =>
-                      add-error(l, msg(errTypeNotDefined(fmty(nmty(childname)))))^seq(
+                      add-error(l, msg(errTypeNotDefined(fmty(child))))^seq(
+                        return(dynType))
+                    | some(childbind) =>
+                      cases(TypeBinding) childbind:
+                        | typeNominal(_) => return(false)
+                        | typeAlias(childty) =>
+                          subtype-int(false, childty, parent)
+                      end
+                  end
+                end)
+            end
+          | else => return(false)
+        end
+      | appType(parentparams, parentname, parentargs) =>
+        cases(Type) child:
+          | dynType => return(true)
+          | anyType => return(true)
+          | appType(childparams, childname, childargs) =>
+            if (parentname <> childname) or (parentargs.length() <> childargs.length()):
+              return(false)
+            else:
+              # NOTE(dbp 2013-11-07): I don't know how to do this properly,
+              # so I'm going to do something approximate - if no parameters,
+              # do subtyping across children, if there are, do pure equality.
+              if (parentparams == []) and (childparams == []):
+                sequence(map2(subtype(l,_,_), childargs, parentargs))^bind(fun(sts):
+                    return(list.all(fun(x): x end, sts))
+                  end)
+              else:
+                return(child == parent)
+              end
+            end
+          | nameType(childname) =>
+            if not recur:
+              return(false)
+            else:
+              get-type-env()^bind(fun(type-env):
+                  cases(Option) map-get(type-env, child):
+                    | none =>
+                      add-error(l, msg(errTypeNotDefined(fmty(child))))^seq(
                         return(dynType))
                     | some(childbind) =>
                       cases(TypeBinding) childbind:
@@ -990,6 +1080,15 @@ where:
 
   eval(subtype(l, anyType, nmty("Any")), [], [], [], default-type-env) is true
 
+  eval(subtype(l, appty("Foo", []), nmty("Any")), [], [], [], default-type-env)
+  is true
+  eval(subtype(l, appty("Foo", []), appType(["T"], "Foo", [])), [], [], [], default-type-env)
+  is false
+  eval(subtype(l, appty("Foo", ["String"]), appty("Foo", ["Any"])), [], [], [], default-type-env)
+  is true
+  eval(subtype(l, appType(["T"], "Option", [nmty("T")]), appType(["T"], "Option", [nmty("T")])), [], [], [], default-type-env)
+  is true
+
 end
 
 
@@ -1006,9 +1105,29 @@ fun simple-mty(self, args, ret):
   end
   methodType([], mkty(self), args.map(mkty), mkty(ret), moreRecord([]))
 end
+fun app-mty(self, param, args, ret):
+  fun mkty(t):
+    if String(t):
+      nmty(t)
+    else:
+      t
+    end
+  end
+  methodType([], appty(self, [param]), args.map(mkty), mkty(ret), moreRecord([]))
+end
+fun param-app-mty(params, self, param, args, ret):
+  fun mkty(t):
+    if String(t):
+      nmty(t)
+    else:
+      t
+    end
+  end
+  methodType(params, appty(self, [param]), args.map(mkty), mkty(ret), moreRecord([]))
+end
 default-type-env = [
-  pair("Any", typeAlias(anyType)),
-  pair("Bool",  typeNominal(anonType(normalRecord([
+  pair(nameType("Any"), typeAlias(anyType)),
+  pair(nameType("Bool"),  typeNominal(anonType(normalRecord([
           pair("_and", simple-mty("Bool", [arrowType([], [], nmty("Bool"), moreRecord([]))], "Bool")),
           pair("_or", simple-mty("Bool", [arrowType([], [], nmty("Bool"), moreRecord([]))], "Bool")),
           pair("tostring", simple-mty("Bool", [], "String")),
@@ -1016,7 +1135,7 @@ default-type-env = [
           pair("_equals",  simple-mty("Bool", ["Any"], "Bool")),
           pair("_not", simple-mty("Bool", [], "Bool"))
         ])))),
-  pair("Number",
+  pair(nameType("Number"),
       typeNominal(anonType(normalRecord([
           pair("_plus", simple-mty("Number", ["Number"], "Number")),
           pair("_add", simple-mty("Number", ["Number"], "Number")),
@@ -1052,7 +1171,7 @@ default-type-env = [
           pair("expt", simple-mty("Number", ["Number"], "Number"))
         ])))
     ),
-  pair("String", typeNominal(anonType(normalRecord([
+  pair(nameType("String"), typeNominal(anonType(normalRecord([
             pair("_plus", simple-mty("String", ["String"], "String")),
             pair("_lessequal", simple-mty("String", ["String"], "Bool")),
             pair("_lessthan", simple-mty("String", ["String"], "Bool")),
@@ -1071,47 +1190,50 @@ default-type-env = [
             pair("tostring", simple-mty("String", [], "String")),
             pair("_torepr", simple-mty("String", [], "String"))
           ])))),
-  pair("List", typeNominal(anonType(normalRecord([
-            pair("length", simple-mty("List", [], "Number")),
-            pair("each", simple-mty("List", [arrowType([], [nmty("Any")], nmty("Nothing"), moreRecord([]))], "Nothing")),
-            pair("map", simple-mty("List", [arrowType([], [nmty("Any")], dynType, moreRecord([]))], "List")),
-            pair("filter", simple-mty("List", [arrowType([], [nmty("Any")], nmty("Bool"), moreRecord([]))], "List")),
-            pair("find", simple-mty("List", [arrowType([], [nmty("Any")], nmty("Bool"), moreRecord([]))], "Option")),
-            pair("partition", simple-mty("List", [arrowType([], [nmty("Any")], nmty("Bool"), moreRecord([]))], anonType(normalRecord([pair("is-true", nmty("List")), pair("is-false", nmty("List"))])))),
-            pair("foldr", simple-mty("List", [arrowType([], [dynType, dynType], dynType, moreRecord([])), dynType], dynType)),
-            pair("foldl", simple-mty("List", [arrowType([], [dynType, dynType], dynType, moreRecord([])), dynType], dynType)),
-            pair("member", simple-mty("List", ["Any"], "Bool")),
-            pair("append", simple-mty("List", ["List"], "List")),
-            pair("last", simple-mty("List", [], dynType)),
-            pair("take", simple-mty("List", ["Number"], "List")),
-            pair("drop", simple-mty("List", ["Number"], "List")),
-            pair("reverse", simple-mty("List", [], "List")),
-            pair("get", simple-mty("List", ["Number"], dynType)),
-            pair("set", simple-mty("List", ["Number", dynType], "List")),
-            pair("_equals", simple-mty("List", ["Any"], "Bool")),
-            pair("tostring", simple-mty("List", [], "String")),
-            pair("_torepr", simple-mty("List", [], "String")),
-            pair("sort-by", simple-mty("List",
-                [arrowType([],[dynType, dynType], nmty("Bool"), moreRecord([])),
-                  arrowType([],[dynType, dynType], nmty("Bool"), moreRecord([]))], "List")),
-            pair("sort", simple-mty("List", [], "List")),
-            pair("join-str", simple-mty("List", ["String"], "List"))
+  pair(nameType("List"), typeAlias(appType(["T"], "List", [nmty("T")]))),
+  pair(appType(["T"], "List", [nmty("T")]),
+    typeNominal(anonType(normalRecord([
+            pair("length", app-mty("List", "T", [], "Number")),
+            pair("each", app-mty("List", "T", [arrowType([], [nmty("T")], nmty("Nothing"), moreRecord([]))], "Nothing")),
+            pair("map", param-app-mty(["U"], "List", "T", [arrowType([], [nmty("T")], nmty("U"), moreRecord([]))], appty("List", ["U"]))),
+            pair("filter", app-mty("List", "T", [arrowType([], [nmty("T")], nmty("Bool"), moreRecord([]))], appty("List", ["T"]))),
+            pair("find", app-mty("List", "T", [arrowType([], [nmty("T")], nmty("Bool"), moreRecord([]))], appty("Option", ["T"]))),
+            pair("partition", app-mty("List", "T", [arrowType([], [nmty("T")], nmty("Bool"), moreRecord([]))],
+                  anonType(normalRecord([pair("is-true", appty("List", ["T"])), pair("is-false", appty("List", ["T"]))])))),
+            pair("foldr", param-app-mty(["U"], "List", "T", [arrowType([], [nmty("T"), nmty("U")], nmty("U"), moreRecord([])), nmty("U")], nmty("U"))),
+            pair("foldl", param-app-mty(["U"], "List", "T", [arrowType([], [nmty("T"), nmty("U")], nmty("U"), moreRecord([])), nmty("U")], nmty("U"))),
+            pair("member", app-mty("List", "T", ["T"], "Bool")),
+            pair("append", app-mty("List", "T", [appty("List", ["T"])], appty("List", ["T"]))),
+            pair("last", app-mty("List", "T", [], nmty("T"))),
+            pair("take", app-mty("List", "T", ["Number"], appty("List", ["T"]))),
+            pair("drop", app-mty("List", "T", ["Number"], appty("List", ["T"]))),
+            pair("reverse", app-mty("List", "T", [], appty("List", ["T"]))),
+            pair("get", app-mty("List", "T", ["Number"], nmty("T"))),
+            pair("set", app-mty("List", "T", ["Number", nmty("T")], appty("List", ["T"]))),
+            pair("_equals", app-mty("List", "T", ["Any"], "Bool")),
+            pair("tostring", app-mty("List", "T", [], "String")),
+            pair("_torepr", app-mty("List", "T", [], "String")),
+            pair("sort-by", app-mty("List", "T",
+                [arrowType([],[nmty("T"), nmty("T")], nmty("Bool"), moreRecord([])),
+                  arrowType([],[nmty("T"), nmty("T")], nmty("Bool"), moreRecord([]))], appty("List", ["T"]))),
+            pair("sort", app-mty("List", "T", [], appty("List", ["T"]))),
+            pair("join-str", app-mty("List", "T", ["String"], appty("List", ["T"])))
           ])))),
-  pair("Option", typeNominal(anonType(moreRecord([])))),
-  pair("Nothing", typeNominal(anonType(normalRecord([]))))
+  pair(nameType("Option"), typeNominal(anonType(moreRecord([])))),
+  pair(nameType("Nothing"), typeNominal(anonType(normalRecord([]))))
 ]
 
 fun tc-main(p, s):
   env = [
     pair("list", anonType(
         moreRecord([
-            pair("map", dynType),
-            pair("link", arrowType([],[anyType, nmty("List")], nmty("List"), moreRecord([]))),
+            pair("map", arrowType(["U", "T"], [arrowType([], [nmty("T")], nmty("U"), moreRecord([])), appty("List", ["T"])], appty("List", ["U"]))),
+            pair("link", arrowType(["T"],[nmty("T"), appty("List", ["T"])], appty("List", ["T"]), moreRecord([]))),
             pair("empty", nmty("List"))
           ]))),
     pair("builtins", anonType(moreRecord([]))),
     pair("error", anonType(moreRecord([]))),
-    pair("link", arrowType([],[anyType, nmty("List")], nmty("List"), moreRecord([]))),
+    pair("link", arrowType(["T"],[nmty("T"), appty("List", ["T"])], appty("List", ["T"]), moreRecord([]))),
     pair("empty", nmty("List")),
     pair("nothing", nmty("Nothing")),
     pair("some", arrowType([], [anyType], nmty("Option"), moreRecord([]))),
@@ -1122,6 +1244,7 @@ fun tc-main(p, s):
     pair("tostring", arrowType([], [anyType], nmty("String"), moreRecord([]))),
     pair("torepr", arrowType([], [anyType], nmty("String"), moreRecord([]))),
     pair("fold", dynType),
+    pair("map", arrowType(["U", "T"], [arrowType([], [nmty("T")], nmty("U"), moreRecord([])), appty("List", ["T"])], appty("List", ["U"]))),
     pair("map2", dynType),
     pair("raise", arrowType([], [anyType], anyType, moreRecord([]))),
     pair("identical", arrowType([], [anyType, anyType], nmty("Bool"), moreRecord([]))),
@@ -1319,7 +1442,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                                   # NOTE(dbp 2013-10-21): Gah, mutation. This code should
                                   # be refactored.
                                   var inferred = false
-                                  add-types(ps.map(fun(n): pair(n, typeNominal(nmty(n))) end),
+                                  bind-params(ps,
                                     sequence(for map2(b from args, inf from fty.args):
                                         if A.is-a_blank(b.ann):
                                           when inf <> dynType:
@@ -1393,7 +1516,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                     end)
                 | s_lam(l, ps, args, ann, doc, body, ck) =>
                   # NOTE(dbp 2013-11-03): Check for type shadowing.
-                  add-types(ps.map(fun(n): pair(n, typeNominal(nmty(n))) end),
+                  bind-params(ps,
                     get-type(ann)^bind(fun(ret-ty):
                         sequence(args.map(fun(b): get-type(b.ann)^bind(fun(t): return(pair(b.id, t)) end) end))^bind(fun(new-binds):
                             add-bindings(new-binds,
@@ -1542,14 +1665,14 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                       fun record-name-lookup(name):
                         get-type-env()^bind(fun(type-env):
                             cases(Option) map-get(type-env, name):
-                              | none => add-error(l, msg(errTypeNotDefined(fmty(nmty(name)))))^seq(return(dynType))
+                              | none => add-error(l, msg(errTypeNotDefined(fmty(name))))^seq(return(dynType))
                               | some(recordbind) =>
                                 cases(Type) recordbind.type:
                                   | anonType(record) => record-lookup(record)
                                   | anyType => return(dynType)
                                   | dynType => return(dynType)
                                     # NOTE(dbp 2013-11-05): Not doing cycle detection in type env. Could go into an infinite loop.
-                                  | nameType(name2) => record-name-lookup(name2)
+                                  | nameType(_) => record-name-lookup(recordbind.type)
                                 end
                             end
                           end)
@@ -1559,7 +1682,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                             | dynType => return(dynType)
                             | anyType => return(dynType)
                             | anonType(record) => record-lookup(record)
-                            | nameType(name) => record-name-lookup(name)
+                            | nameType(_) => record-name-lookup(obj-ty)
                           end
                         end)
                     | else =>
