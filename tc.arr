@@ -1124,6 +1124,7 @@ fun tc-main(p, s):
     pair("fold", dynType),
     pair("map2", dynType),
     pair("raise", arrowType([], [anyType], anyType, moreRecord([]))),
+    pair("identical", arrowType([], [anyType, anyType], nmty("Bool"), moreRecord([]))),
     pair("Racket", dynType),
     pair("List", arrowType([], [anyType], nmty("Bool"), moreRecord([]))),
     pair("String", arrowType([], [anyType], nmty("Bool"), moreRecord([]))),
