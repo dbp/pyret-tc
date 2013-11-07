@@ -553,11 +553,21 @@ fun get-bindings(ast :: A.Expr) -> TCST<List<Pair<String, Type>>>:
   doc: "This function implements letrec behavior."
   fun name-val-binds(name, val):
     if A.is-a_blank(name.ann):
-      # NOTE(dbp 2013-11-03): Giving the id dyn seems wrong... but
-      # also not sure what else to do, as we need some type for
-      # desugared recursive functions.
-      add-bindings([pair(name.id, dynType)],
-        tc(val)^bind(fun(ty): return([pair(name.id, ty)]) end))
+      cases(A.Expr) val:
+        | s_lam(l1, ps, args, ann, doc, body, ck) =>
+          add-types(ps.map(fun(n): pair(n, typeNominal(nmty(n))) end),
+            sequence(args.map(fun(b): get-type(b.ann) end))^bind(fun(arg-tys):
+                get-type(ann)^bind(fun(ret-ty):
+                    return([pair(name.id, arrowType(ps, arg-tys, ret-ty, moreRecord([])))])
+                  end)
+              end)
+            )
+        | else =>
+          # NOTE(dbp 2013-11-07): This seems buggy - we want to type check
+          # it if it is something simple (like a number, string, application),
+          # but not if it can have things like functions in it.
+          tc(val)^bind(fun(ty): return([pair(name.id, ty)]) end)
+      end
     else:
       get-type(name.ann)^bind(fun(ty): return([pair(name.id, ty)]) end)
     end
@@ -1303,37 +1313,39 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                                   # NOTE(dbp 2013-10-21): Gah, mutation. This code should
                                   # be refactored.
                                   var inferred = false
-                                  sequence(for map2(b from args, inf from fty.args):
-                                      if A.is-a_blank(b.ann):
-                                        when inf <> dynType:
-                                          inferred := true
+                                  add-types(ps.map(fun(n): pair(n, typeNominal(nmty(n))) end),
+                                    sequence(for map2(b from args, inf from fty.args):
+                                        if A.is-a_blank(b.ann):
+                                          when inf <> dynType:
+                                            inferred := true
+                                          end
+                                          return(inf)
+                                        else:
+                                          get-type(b.ann)
                                         end
-                                        return(inf)
-                                      else:
-                                        get-type(b.ann)
-                                      end
-                                    end)^bind(fun(arg-tys):
-                                      add-bindings(for map2(b from args, t from arg-tys):
-                                          pair(b.id, t)
-                                        end,
-                                        tc(body)^bind(fun(body-ty):
-                                            (if A.is-a_blank(ann): return(fty.ret) else: get-type(ann) end)^bind(fun(ret-ty):
-                                                subtype(l, body-ty, ret-ty)^bind(fun(st):
-                                                    if st:
-                                                      return(arrowType(ps, arg-tys, ret-ty, moreRecord([])))
-                                                    else:
-                                                      add-error(l,
-                                                        if inferred:
-                                                          msg(errFunctionInferredIncompatibleReturn(fmty(body-ty), fmty(ret-ty)))
-                                                        else:
-                                                          msg(errFunctionAnnIncompatibleReturn(fmty(body-ty), fmty(ret-ty)))
-                                                        end)^seq(return(dynType))
-                                                    end
-                                                  end)
-                                              end)
-                                          end)
-                                        )
-                                    end)
+                                      end)^bind(fun(arg-tys):
+                                        add-bindings(for map2(b from args, t from arg-tys):
+                                            pair(b.id, t)
+                                          end,
+                                          tc(body)^bind(fun(body-ty):
+                                              (if A.is-a_blank(ann): return(fty.ret) else: get-type(ann) end)^bind(fun(ret-ty):
+                                                  subtype(l, body-ty, ret-ty)^bind(fun(st):
+                                                      if st:
+                                                        return(arrowType(ps, arg-tys, ret-ty, moreRecord([])))
+                                                      else:
+                                                        add-error(l,
+                                                          if inferred:
+                                                            msg(errFunctionInferredIncompatibleReturn(fmty(body-ty), fmty(ret-ty)))
+                                                          else:
+                                                            msg(errFunctionAnnIncompatibleReturn(fmty(body-ty), fmty(ret-ty)))
+                                                          end)^seq(return(dynType))
+                                                      end
+                                                    end)
+                                                end)
+                                            end)
+                                          )
+                                      end)
+                                    )
                                 | else =>
                                   # NOTE(dbp 2013-10-21): This is a bizarre case. It means
                                   # we no longer understand the desugaring, so we really
