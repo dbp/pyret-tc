@@ -308,6 +308,9 @@ data TCError:
   | errIfBranchType(type1, type2) with: tostring(self):
       "All branches of an if expression must evaluate to the same type. Found branches with type " + self.type1 + " which is incompatible with this branch, which has type " + self.type2 + "."
     end
+  | errAnnDotNotSupported(obj, field) with: tostring(self):
+      "Dotted annotations are currently not supported, so we are treating " + self.obj + "." + self.field + " as the Dynamic type."
+    end
 end
 
 fun msg(err :: TCError) -> String:
@@ -514,7 +517,9 @@ fun get-type(ann :: A.Ann) -> TCST<Type>:
         fun(fieldsty):
           return(anonType(normalRecord(fieldsty)))
         end)
-    | else => return(dynType)
+    | a_app(l, ann1, args) => get-type(ann1)
+    | a_dot(l, obj, field) => add-error(l, errAnnDotNotSupported(obj, field))^return(dynType)
+    | a_pred(l, ann1, _) => get-type(ann1)
   end
 end
 
