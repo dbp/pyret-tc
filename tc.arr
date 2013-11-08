@@ -1594,6 +1594,32 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                                             return(nothing)
                                           end
                                       end
+                                    else if is-appType(at) and list.any(fun(x): x end, at.args.map(fun(a): is-nameType(a) and params.member(a.name) end)):
+                                      if not is-appType(av):
+                                        arg-error := true
+                                        add-error(l,
+                                          msg(errArgumentBadType(counter, fmty(at), fmty(av))))
+                                      else:
+                                        sequence(for map2(a from at.args, v from av.args):
+                                            if is-nameType(a) and params.member(a.name):
+                                              cases(Option) map-get(param-inst, a):
+                                                | none =>
+                                                  param-inst := link(pair(a, v), param-inst)
+                                                  return(nothing)
+                                                | some(exist) =>
+                                                  if not tyequal(exist, v):
+                                                    arg-error := true
+                                                    add-error(l,
+                                                      msg(errArgumentBadType(counter, fmty(at), fmty(av))))
+                                                  else:
+                                                    return(nothing)
+                                                  end
+                                              end
+                                            else:
+                                              return(nothing)
+                                            end
+                                          end)
+                                      end
                                     else:
                                       subtype(l, av, at)^bind(fun(res):
                                           if not res:
@@ -1606,17 +1632,26 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                                         end)
                                     end
                                   end)^seq(block:
-                                  if arg-error:
-                                    return(dynType)
-                                  else if is-nameType(ret-type) and params.member(ret-type.name):
-                                    cases(Option) map-get(param-inst, ret-type):
-                                      | none =>
-                                        raise("tc: type checked a body at " + torepr(l) + " to return a type parameter not present in the arguments, which shouldn't be possible.")
-                                      | some(t) => return(t)
+                                    if arg-error:
+                                      return(dynType)
+                                    else if is-nameType(ret-type) and params.member(ret-type.name):
+                                      cases(Option) map-get(param-inst, ret-type):
+                                        | none =>
+                                          raise("tc: type checked a body at " + torepr(l) + " to return a type parameter not present in the arguments, which shouldn't be possible.")
+                                        | some(t) => return(t)
+                                      end
+                                    else if is-appType(ret-type) and list.any(fun(x): x end, ret-type.args.map(fun(a): is-nameType(a) and params.member(a.name) end)):
+                                      return(
+                                        appType(ret-type.params, ret-type.name,
+                                          for map(a from ret-type.args):
+                                            cases(Option) map-get(param-inst, a):
+                                              | none => a
+                                              | some(t) => t
+                                            end
+                                          end))
+                                    else:
+                                      return(ret-type)
                                     end
-                                  else:
-                                    return(ret-type)
-                                  end
                                   end)
                               end)
                           end
