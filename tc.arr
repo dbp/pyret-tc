@@ -953,7 +953,7 @@ fun subtype(l :: Loc, _child :: Type, _parent :: Type) -> TCST<Bool>:
                   cases(Option) map-get(type-env, parent):
                     | none =>
                       add-error(l, msg(errTypeNotDefined(fmty(parent))))^seq(
-                        return(dynType))
+                        return(false))
                     | some(parentbind) =>
                       cases(TypeBinding) parentbind:
                         | typeNominal(_) => return(false)
@@ -977,7 +977,7 @@ fun subtype(l :: Loc, _child :: Type, _parent :: Type) -> TCST<Bool>:
                   cases(Option) map-get(type-env, child):
                     | none =>
                       add-error(l, msg(errTypeNotDefined(fmty(child))))^seq(
-                        return(dynType))
+                        return(false))
                     | some(childbind) =>
                       cases(TypeBinding) childbind:
                         | typeNominal(_) => return(false)
@@ -1227,7 +1227,7 @@ fun tc-main(p, s):
   env = [
     pair("list", anonType(
         moreRecord([
-            pair("map", arrowType(["U", "T"], [arrowType([], [nmty("T")], nmty("U"), moreRecord([])), appty("List", ["T"])], appty("List", ["U"]))),
+            pair("map", arrowType(["U", "T"], [arrowType([], [nmty("T")], nmty("U"), moreRecord([])), appty("List", ["T"])], appty("List", ["U"]), moreRecord([]))),
             pair("link", arrowType(["T"],[nmty("T"), appty("List", ["T"])], appty("List", ["T"]), moreRecord([]))),
             pair("empty", nmty("List"))
           ]))),
@@ -1236,15 +1236,15 @@ fun tc-main(p, s):
     pair("link", arrowType(["T"],[nmty("T"), appty("List", ["T"])], appty("List", ["T"]), moreRecord([]))),
     pair("empty", nmty("List")),
     pair("nothing", nmty("Nothing")),
-    pair("some", arrowType([], [anyType], nmty("Option"), moreRecord([]))),
-    pair("none", nmty("Option")),
+    pair("some", arrowType(["T"], [nmty("T")], appty("Option", ["T"]), moreRecord([]))),
+    pair("none", appType(["T"], "Option", [nmty("T")])),
     pair("true", nmty("Bool")),
     pair("false", nmty("Bool")),
     pair("print", arrowType([], [anyType], nmty("Nothing"), moreRecord([]))),
     pair("tostring", arrowType([], [anyType], nmty("String"), moreRecord([]))),
     pair("torepr", arrowType([], [anyType], nmty("String"), moreRecord([]))),
     pair("fold", dynType),
-    pair("map", arrowType(["U", "T"], [arrowType([], [nmty("T")], nmty("U"), moreRecord([])), appty("List", ["T"])], appty("List", ["U"]))),
+    pair("map", arrowType(["U", "T"], [arrowType([], [nmty("T")], nmty("U"), moreRecord([])), appty("List", ["T"])], appty("List", ["U"]), moreRecord([]))),
     pair("map2", dynType),
     pair("raise", arrowType([], [anyType], anyType, moreRecord([]))),
     pair("identical", arrowType([], [anyType, anyType], nmty("Bool"), moreRecord([]))),
@@ -1384,7 +1384,7 @@ fun tc-cases(l :: Loc, _type :: A.Ann, val :: A.Expr, branches :: List<A.CasesBr
                             | else =>
                               add-error(branch.l,
                                 msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
-                                )^seq(dynType)
+                                )^seq(return(dynType))
                           end
                       end
                     end
@@ -1671,6 +1671,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                                   | anonType(record) => record-lookup(record)
                                   | anyType => return(dynType)
                                   | dynType => return(dynType)
+                                  | appType(_,_,_) => return(dynType)
                                     # NOTE(dbp 2013-11-05): Not doing cycle detection in type env. Could go into an infinite loop.
                                   | nameType(_) => record-name-lookup(recordbind.type)
                                 end
@@ -1681,6 +1682,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                           cases(Type) obj-ty:
                             | dynType => return(dynType)
                             | anyType => return(dynType)
+                            | appType(_,_,_) => return(dynType)
                             | anonType(record) => record-lookup(record)
                             | nameType(_) => record-name-lookup(obj-ty)
                           end
