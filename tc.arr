@@ -434,29 +434,30 @@ fun appty(name :: String, args :: List<String>) -> Type:
   appType([], name, args.map(nmty))
 end
 
+fun recequal(r1 :: RecordType, r2 :: RecordType) -> Bool:
+  doc: "Everything mentioned in a moreRecord must be in the normalRecord."
+  cases(RecordType) r1:
+    | normalRecord(fields1) =>
+      cases(RecordType) r2:
+        | normalRecord(fields2) => fields1 == fields2
+        | moreRecord(fields2) =>
+          for fold(base from true, field from fields2):
+            base and fields1.member(field)
+          end
+      end
+    | moreRecord(fields1) =>
+      cases(RecordType) r2:
+        | normalRecord(fields2) =>
+          for fold(base from true, field from fields1):
+            base and fields2.member(field)
+          end
+        | moreRecord(_) => true
+      end
+  end
+end
+
 fun tyequal(t1 :: Type, t2 :: Type) -> Bool:
   doc: "Type equality, allowing for moreRecords containing unknown additional fields."
-  fun recequal(r1 :: RecordType, r2 :: RecordType) -> Bool:
-    doc: "Everything mentioned in a moreRecord must be in the normalRecord."
-    cases(RecordType) r1:
-      | normalRecord(fields1) =>
-        cases(RecordType) r2:
-          | normalRecord(fields2) => fields1 == fields2
-          | moreRecord(fields2) =>
-            for fold(base from true, field from fields2):
-              base and fields1.member(field)
-            end
-        end
-      | moreRecord(fields1) =>
-        cases(RecordType) r2:
-          | normalRecord(fields2) =>
-            for fold(base from true, field from fields1):
-              base and fields2.member(field)
-            end
-          | moreRecord(_) => true
-        end
-    end
-  end
   cases(Type) t1:
     | nameType(name1) =>
       cases(Type) t2:
@@ -513,6 +514,98 @@ fun tycompat(t1 :: Type, t2 :: Type) -> Bool:
         | else => t1 == t2
       end
   end
+end
+
+# FIXME(dbp 2013-11-07): recequal is not right - as it isn't generating constraints.
+fun tyinstantiable(params :: List<String>, name :: String, args :: List<Type>, type :: Type) -> Bool:
+  if params == []:
+    type == appType(params, name, args)
+  else:
+    var constraints = []
+    fun push(a, b): constraints := link(pair(a,b), constraints) end
+    fun struct-equal(t1 :: Type, t2 :: Type) -> Bool:
+      cases(Type) t1:
+        | nameType(name1) =>
+          cases(Type) t2:
+            | nameType(name2) =>
+              if params.member(name1):
+                push(name1, name2)
+                true
+              else:
+                name1 == name2
+              end
+            | else => false
+          end
+        | anonType(rec1) =>
+          cases(Type) t2:
+            | anonType(rec2) =>
+              recequal(rec1, rec2)
+            | else => false
+          end
+        | arrowType(params1, args1, ret1, rec1) =>
+          cases(Type) t2:
+            | arrowType(params2, args2, ret2, rec2) =>
+              # FIXME(dbp 2013-11-07): Shadowing of type parameters, and comparing without caring about names for params.
+              (params1 == params2) and (args1.length() == args2.length()) and map2(struct-equal, args1, args2)
+              and struct-equal(ret1, ret2) and recequal(rec1, rec2)
+            | else => false
+          end
+        | methodType(params1, self1, args1, ret1, rec1) =>
+          cases(Type) t2:
+            | methodType(params2, self2, args2, ret2, rec2) =>
+              (params1 == params2) and struct-equal(self1, self2) and (args1.length() == args2.length())
+              and map2(struct-equal, args1, args2) and struct-equal(ret1, ret2) and recequal(rec1, rec2)
+            | else => false
+          end
+        | appType(params1, name1, args1) =>
+          cases(Type) t2:
+            | appType(params2, name2, args2) =>
+              (if params.member(name1):
+                push(name1, name2)
+                true
+              else:
+                name1 == name2
+              end) and (args1.length() == args2.length()) and
+              list.all(fun(x): x end, map2(struct-equal, args1, args2))
+            | else => false
+          end
+        | dynType => t2 == dynType
+        | anyType => t2 == anyType
+      end
+    end
+
+    fun constraints-satisfy(cs):
+      fun replace(n, p):
+        cases(Pair<String,String>) p:
+          | pair(l, r) =>
+            pair(if l == n: n else: l end, if r == n: n else: r end)
+        end
+      end
+      cases(List<Pair<String, String>>) cs:
+        | empty => true
+        | link(f, r) =>
+          cases(Pair<String,String>) f:
+            | pair(left, right) =>
+              if left == right:
+                constraints-satisfy(r)
+              else if params.member(left):
+                constraints-satisfy(r.map(replace(left, _)))
+              else:
+                false
+              end
+          end
+      end
+    end
+    se = struct-equal(appType(params, name, args), type)
+    cse = constraints-satisfy(constraints)
+    se and cse
+  end
+where:
+  tyinstantiable([], "Foo", [], appType([], "Foo", [])) is true
+  tyinstantiable([], "Foo", [], nmty("Foo")) is false
+  tyinstantiable(["T"], "Foo", [nmty("T")], appType([], "Foo", [nmty("String")])) is true
+  tyinstantiable(["T"], "Foo", [nmty("T")], appType([], "Bar", [nmty("String")])) is false
+  tyinstantiable(["T"], "Foo", [nmty("T")], appType([], "Foo", [nmty("String"), nmty("Number")])) is false
 end
 
 fun get-type(ann :: A.Ann) -> TCST<Type>:
@@ -1219,7 +1312,8 @@ default-type-env = [
             pair("sort", app-mty("List", "T", [], appty("List", ["T"]))),
             pair("join-str", app-mty("List", "T", ["String"], appty("List", ["T"])))
           ])))),
-  pair(nameType("Option"), typeNominal(anonType(moreRecord([])))),
+  pair(nameType("Option"), typeAlias(appType(["T"], "Option", [nmty("T")]))),
+  pair(appType(["T"], "Option", [nmty("T")]), typeNominal(anonType(moreRecord([])))),
   pair(nameType("Nothing"), typeNominal(anonType(normalRecord([]))))
 ]
 
@@ -1229,12 +1323,12 @@ fun tc-main(p, s):
         moreRecord([
             pair("map", arrowType(["U", "T"], [arrowType([], [nmty("T")], nmty("U"), moreRecord([])), appty("List", ["T"])], appty("List", ["U"]), moreRecord([]))),
             pair("link", arrowType(["T"],[nmty("T"), appty("List", ["T"])], appty("List", ["T"]), moreRecord([]))),
-            pair("empty", nmty("List"))
+            pair("empty", appType(["T"], "List", [nmty("T")]))
           ]))),
     pair("builtins", anonType(moreRecord([]))),
     pair("error", anonType(moreRecord([]))),
     pair("link", arrowType(["T"],[nmty("T"), appty("List", ["T"])], appty("List", ["T"]), moreRecord([]))),
-    pair("empty", nmty("List")),
+    pair("empty", appType(["T"], "List", [nmty("T")])),
     pair("nothing", nmty("Nothing")),
     pair("some", arrowType(["T"], [nmty("T")], appty("Option", ["T"]), moreRecord([]))),
     pair("none", appType(["T"], "Option", [nmty("T")])),
@@ -1305,6 +1399,21 @@ fun tc-member(ast :: A.Member) -> TCST<Option<Pair<String,Type>>>:
 end
 
 fun tc-cases(l :: Loc, _type :: A.Ann, val :: A.Expr, branches :: List<A.CasesBranch>, _branches-ty :: Type) -> TCST<Type>:
+  fun tc-branch(branch, branches-ty) -> TCST<Type>:
+    tc(branch.body)^bind(fun(branchty):
+        if branches-ty == anyType: # in first branch
+          return(branchty)
+        else:
+          if tycompat(branchty, branches-ty):
+            return(branchty)
+          else:
+            add-error(branch.l,
+              msg(errCasesBranchType(fmty(branches-ty), fmty(branchty), branch.name))
+              )^seq(return(dynType))
+          end
+        end
+      end)
+  end
   get-type(_type)^bind(
     fun(type):
       tc(val)^bind(
@@ -1347,19 +1456,7 @@ fun tc-cases(l :: Loc, _type :: A.Ann, val :: A.Expr, branches :: List<A.CasesBr
                                       argty from args):
                                     pair(bnd.id, argty)
                                   end,
-                                  tc(branch.body)^bind(fun(branchty):
-                                      if branches-ty == anyType: # in first branch
-                                        return(branchty)
-                                      else:
-                                        if tycompat(branchty, branches-ty):
-                                          return(branchty)
-                                        else:
-                                          add-error(branch.l,
-                                            msg(errCasesBranchType(fmty(branches-ty), fmty(branchty), branch.name))
-                                            )^seq(return(dynType))
-                                        end
-                                      end
-                                    end))
+                                  tc-branch(branch, branches-ty))
                               end
                             | nameType(_) =>
                               if not tyequal(ty, type):
@@ -1367,19 +1464,15 @@ fun tc-cases(l :: Loc, _type :: A.Ann, val :: A.Expr, branches :: List<A.CasesBr
                                   msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
                                   )^seq(return(dynType))
                               else:
-                                tc(branch.body)^bind(fun(branchty):
-                                    if branches-ty == anyType:
-                                      return(branchty)
-                                    else:
-                                      if tycompat(branchty, branches-ty):
-                                        return(branchty)
-                                      else:
-                                        add-error(branch.l,
-                                          msg(errCasesBranchType(fmty(branches-ty), fmty(branchty), branch.name))
-                                          )^seq(return(branches-ty))
-                                      end
-                                    end
-                                  end)
+                                tc-branch(branch, branches-ty)
+                              end
+                            | appType(params, name, args) =>
+                              if not tyinstantiable(params, name, args, type):
+                                add-error(branch.l,
+                                  msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
+                                  )^seq(return(dynType))
+                              else:
+                                tc-branch(branch, branches-ty)
                               end
                             | else =>
                               add-error(branch.l,
