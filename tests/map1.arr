@@ -1,7 +1,7 @@
 #lang pyret
 
 fun my-map(fn :: (Any -> Any), l :: List<Any>) -> List<Any>:
-  cases(List) l:
+  cases(List<Any>) l:
     | empty => empty
     | link(f,r) => link(fn(f),my-map(fn, r))
   end

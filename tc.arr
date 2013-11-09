@@ -422,6 +422,15 @@ where:
   [23, 123, 1023].map(fun(n): ordinalize(n) is tostring(n) + "rd" end)
 end
 
+fun<A> zip2(l1 :: List<A>, l2 :: List<B>) -> List<Pair<A,B>>:
+  doc: "Will fail if the second list is shorter than first."
+  cases(List<A>) l1:
+    | empty => empty
+    | link(f, r) => link(pair(f, l2.first), zip2(r, l2.rest))
+  end
+end
+
+
 ################################################################################
 # Basic helper functions.                                                      #
 ################################################################################
@@ -430,8 +439,8 @@ fun nmty(name :: String) -> Type:
   nameType(name)
 end
 
-fun appty(name :: String, args :: List<String>) -> Type:
-  appType([], name, args.map(nmty))
+fun appty(name :: String, args :: List) -> Type:
+  appType([], name, args.map(fun(t): if String(t): nmty(t) else: t end end))
 end
 
 fun recequal(r1 :: RecordType, r2 :: RecordType) -> Bool:
@@ -677,6 +686,280 @@ where:
   my-more-type = anonType(moreRecord([]))
   type-record-add(my-more-type, "foo", my-type)
     is anonType(moreRecord([pair("foo", my-type)]))
+end
+
+fun tysolve(vars :: List<String>, _eqs :: List<Pair<Type, Type>>, tys :: List<Type>) -> Option<List<Type>>:
+  doc: "Solves for vars using eqs (by constraint generation/elimination) and uses those to substitute into tys.
+        If all are not solved for, returning none. This is how we instantiate type parameters through local inference."
+
+  fun congen(eqs :: List<Pair<Type, Type>>) -> List<Pair<String,Type>>:
+    doc: "Output are pairs of v, ty, where v is a name in vars that should equal ty"
+    fun recgen(r1 :: RecordType, r2 :: RecordType) -> List<Pair<String, Type>>:
+      fun recgen-int(f1, f2):
+        cases(List) f1:
+          | empty => empty
+          | link(p1,r) =>
+            cases(Option) map-get(f2, p1.a):
+              | none => raise(nothing)
+              | some(p2) =>
+                congen(link(pair(p1.b, p2), recgen-int(r, f2.rest)))
+            end
+        end
+      end
+      if (r1.fields.length() <> r2.fields.length()) or
+        (not list.all(fun(x): x end, r1.fields.map(_.a).map(r2.fields.map(_.a).member(_)))):
+        raise(nothing)
+      else:
+        recgen-int(r1.fields, r2.fields)
+      end
+    end
+    cases(List) eqs:
+      | empty => empty
+      | link(tp, r) =>
+        cases(Pair) tp:
+          | pair(t1, t2) =>
+            cases(Type) t1:
+              | nameType(n1) =>
+                if vars.member(n1):
+                  link(pair(n1, t2), congen(r))
+                else:
+                  if is-nameType(t2) and vars.member(t2.name):
+                      link(pair(t2.name, t1), congen(r))
+                  else if is-dynType(t2):
+                    congen(r)
+                  else:
+                    raise(nothing)
+                  end
+                end
+              | anonType(rec1) =>
+                (cases(Type) t2:
+                  | anonType(rec2) =>
+                    recgen(rec1, rec2)
+                  | else => raise(nothing)
+                  end) + congen(r)
+              | arrowType(params1, args1, ret1, rec1) =>
+                cases(Type) t2:
+                  | arrowType(params2, args2, ret2, rec2) =>
+                    #TODO params
+                    if args1.length() <> args2.length():
+                      raise(nothing)
+                    else:
+                      congen(link(pair(ret1, ret2), zip2(args1, args2))) +
+                      recgen(rec1, rec2) + congen(r)
+                    end
+                  | else =>
+                    if is-nameType(t2) and vars.member(t2.name):
+                      link(pair(t2.name, t1), congen(r))
+                    else:
+                      raise(nothing)
+                    end
+                end
+              | methodType(params1, self1, args1, ret1, rec1) =>
+                cases(Type) t2:
+                  | methodType(params2, self2, args2, ret2, rec2) =>
+                    #TODO params
+                    if args1.length() <> args2.length():
+                      raise(nothing)
+                    else:
+                      congen(link(pair(self1, self2), link(pair(ret1, ret2), zip2(args1, args2)))) +
+                      recgen(rec1, rec2) + congen(r)
+                    end
+                  | else =>
+                    if is-nameType(t2) and vars.member(t2.name):
+                      link(pair(t2.name, t1), congen(r))
+                    else:
+                      raise(nothing)
+                    end
+                end
+              | appType(params1, name1, args1) =>
+                cases(Type) t2:
+                  | appType(params2, name2, args2) =>
+                    #TODO params
+                    if (args1.length() <> args2.length()) or (name1 <> name2):
+                      raise(nothing)
+                    else:
+                      congen(zip2(args1, args2)) + congen(r)
+                    end
+                  | else =>
+                    if is-nameType(t2) and vars.member(t2.name):
+                      link(pair(t2.name, t1), congen(r))
+                    else:
+                      raise(nothing)
+                    end
+                end
+              | dynType =>
+                if t2 == dynType:
+                  congen(r)
+                else if is-nameType(t2) and vars.member(t2.name):
+                  link(pair(t2, t1), congen(r))
+                else:
+                  raise(nothing)
+                end
+              | anyType =>
+                if t2 == anyType:
+                 congen(r)
+                else if is-nameType(t2) and vars.member(t2.name):
+                  link(pair(t2, t1), congen(r))
+                else:
+                  raise(nothing)
+                end
+            end
+        end
+    end
+  end
+
+  var loop-point = nothing
+
+  fun consolve(cons :: List<Pair<String, Type>>) -> List<Pair<String,Type>>:
+    doc: "Output has unique left sides, all in vars."
+    fun appears(v :: String, t :: Type) -> Bool:
+      fun rec-appears(_v :: String, r :: RecordType) -> Bool:
+        list.any(fun(x): x end, r.fields.map(_.b).map(appears(_v,_)))
+      end
+      cases(Type) t:
+        | nameType(name) => name == v
+        | anonType(rec) => rec-appears(v, rec)
+        | arrowType(params, args, ret, rec) =>
+          #TODO params
+          list.any(fun(x): x end, args.map(appears(v,_))) or appears(v, ret) or rec-appears(v, rec)
+        | methodType(params, self, args, ret, rec) =>
+          list.any(fun(x): x end, args.map(appears(v,_))) or  appears(v, self) or appears(v, ret) or rec-appears(v, rec)
+        | appType(params, name, args) =>
+          list.any(fun(x): x end, args.map(appears(v,_)))
+        | dynType => false
+        | anyType => false
+      end
+    end
+    cases(List<Pair<String,Type>>) cons:
+      | empty => empty
+      | link(p, rest) =>
+        cases(Pair<String, Type>) p:
+          | pair(left, right) =>
+            if nmty(left) == right:
+              consolve(rest)
+            else if vars.member(left):
+              if appears(left, right):
+                raise(nothing)
+              else if list.any(fun(x): x end, vars.map(appears(_, right))):
+                if (not Nothing(loop-point)) and identical(loop-point, p):
+                  # don't go into infinite loops.
+                  raise(nothing)
+                else:
+                  when Nothing(loop-point):
+                    loop-point := p
+                  end
+                  consolve(rest + [p])
+                end
+              else:
+                link(pair(left, right), consolve(rest.map(fun(r):
+                        if r.a == left:
+                          if r.b == right:
+                            pair(r.a, nmty(r.a))
+                          else if is-nameType(r.b) and vars.member(r.b.name):
+                            pair(r.b.name, right)
+                          else:
+                            raise(nothing)
+                          end
+                        else:
+                          pair(r.a, replace(left, right, r.b))
+                        end
+                      end)))
+              end
+            else:
+              raise("tysolve: invariant violated - left side should be var.")
+            end
+        end
+    end
+  end
+
+  fun replace(v :: String, nt :: Type, t :: Type) -> Type:
+    doc: "replace any occurrence of nameType(n) with nt in t"
+    fun rec-replace(_v :: String, _nt :: Type, r :: RecordType) -> Bool:
+      cases(RecordType) r:
+        | normalRecord(fields) =>
+          normalRecord(fields.map(fun(p): pair(p.a, replace(_v,_nt,p.b)) end))
+        | moreRecord(fields) =>
+          moreRecord(fields.map(fun(p): pair(p.a, replace(_v,_nt,p.b)) end))
+      end
+    end
+    cases(Type) t:
+      | nameType(name) => if name == v: nt else: t end
+      | anonType(rec) => anonType(rec-replace(v, nt, rec))
+      | arrowType(params, args, ret, rec) =>
+        #TODO params
+        arrowType(params, args.map(replace(v,nt,_)), replace(v,nt,ret), rec-replace(v,nt, rec))
+      | methodType(params, self, args, ret, rec) =>
+        #TODO params
+        methodType(params, replace(v,nt,self), args.map(replace(v,nt,_)), replace(v,nt,ret), rec-replace(v,nt, rec))
+      | appType(params, name, args) =>
+        #TODO params
+        appType(params, name, args.map(replace(v,nt,_)))
+      | dynType => false
+      | anyType => false
+    end
+  end
+
+  fun conreplace(sols :: List<Pair<String,Type>>, _tys :: List<Type>) -> List<Type>:
+    for fold(acc from _tys, sol from sols):
+      acc.map(replace(sol.a, sol.b, _))
+    end
+  end
+
+  try:
+    _eqs^congen()^consolve()^conreplace(tys)^some()
+  except(e):
+    if e == nothing:
+      none
+    else:
+      raise(e)
+    end
+  end
+where:
+  tysolve(["T"], [pair(appType([], "Foo", [nmty("T")]), appty("Foo", ["String"]))],
+    [appType([], "Bar", [nmty("T")])]) is some([appty("Bar", ["String"])])
+
+  tysolve(["T"], [pair(nmty("T"), appty("Foo", ["String"]))],
+    [appType([], "Bar", [nmty("T")])]) is some([appty("Bar", [appty("Foo", ["String"])])])
+
+  tysolve(["T"], [pair(appty("Foo", ["T"]), appty("Foo", ["String"])),
+    pair(nmty("T"), nmty("String"))],
+    [appType([], "Bar", [nmty("T")]), nmty("U")]) is some([appty("Bar", ["String"]), nmty("U")])
+
+  tysolve(["T"], [pair(nmty("T"), nmty("Number")), pair(nmty("T"), nmty("String"))], []) is none
+
+  tysolve(["T", "U"], [pair(nmty("U"), nmty("Number")),
+      pair(anonType(moreRecord([pair("f", nmty("T"))])), nmty("String"))], []) is none
+
+  tysolve(["T", "U"], [pair(nmty("U"), nmty("Number")),
+      pair(anonType(moreRecord([pair("f", nmty("T"))])), anonType(moreRecord([pair("f", nmty("String"))])))],
+    [nmty("U"), nmty("T")]) is some([nmty("Number"), nmty("String")])
+
+  tysolve(["T", "U"], [pair(nmty("T"), nmty("U")), pair(nmty("T"), nmty("String"))], [nmty("U")])
+  is some([nmty("String")])
+
+  tysolve(["T", "U"], [pair(nmty("T"), nmty("U")), pair(nmty("U"), nmty("T"))], [nmty("U")]) is none
+
+  tysolve(["T", "U"], [pair(nmty("T"), nmty("U")), pair(nmty("U"), nmty("T"))], [nmty("U")]) is none
+
+  tysolve(["T"], [pair(arrowType([], [nmty("T")], appty("Foo", ["T"]), moreRecord([])),
+        arrowType([], [nmty("Bool")], appty("Foo", ["String"]), moreRecord([])))], []) is none
+
+  tysolve(["T"], [pair(arrowType([], [nmty("T")], appty("Foo", ["T"]), moreRecord([])),
+        arrowType([], [nmty("Bool")], appty("Foo", ["Bool"]), moreRecord([])))], [nmty("T")]) is some([nmty("Bool")])
+
+  tysolve(["T"], [pair(nmty("T"), appty("Option", ["T"]))], []) is none
+
+  tysolve(["T"], [pair(nmty("String"), appty("Option", ["T"]))], []) is none
+
+  tysolve(["T"], [pair(nmty("String"), appty("Option", ["Number"]))], []) is none
+
+  tysolve(["T"], [pair(nmty("U"), appty("Option", ["Number"]))], [nmty("T")]) is none
+
+  tysolve(["T", "U"], [pair(nmty("T"), appty("Foo", [appty("Bar", ["U"])])),
+                            pair(nmty("String"), nmty("U"))],
+    [nmty("T"), nmty("U")]) is some([appty("Foo", [appty("Bar", ["String"])]), nmty("String")])
+
+  tysolve(["T"], [pair(appty("Foo", ["T"]), appty("Foo", [anyType]))], [nmty("T")]) is some([anyType])
 end
 
 
@@ -1398,6 +1681,107 @@ fun tc-member(ast :: A.Member) -> TCST<Option<Pair<String,Type>>>:
   end
 end
 
+fun tc-app(l :: Loc, fn :: A.Expr, args :: List<A.Expr>) -> TCST<Type>:
+  tc(fn)^bind(fun(fn-ty):
+      cases(Type) fn-ty:
+        | arrowType(params, arg-types, ret-type, rec-type) =>
+          if args.length() <> arg-types.length():
+            add-error(l,
+              msg(errArityMismatch(arg-types.length(), args.length())))^seq(
+              return(dynType))
+          else:
+            sequence(args.map(tc))^bind(fun(arg-vals):
+                var counter = 1
+                var arg-error = false
+                var param-inst = []
+                sequence(
+                  for map2(at from arg-types, av from arg-vals):
+                    # NOTE(dbp 2013-11-04): If it is a type parameter, instantiate it greedily.
+                    if is-nameType(at) and params.member(at.name):
+                      cases(Option) map-get(param-inst, at):
+                        | none =>
+                          param-inst := link(pair(at, av), param-inst)
+                          return(nothing)
+                        | some(exist) =>
+                          if not tyequal(exist, av):
+                            arg-error := true
+                            add-error(l,
+                              msg(errArgumentBadType(counter, fmty(at), fmty(av))))
+                          else:
+                            return(nothing)
+                          end
+                      end
+                    else if is-appType(at) and is-appType(av) and tyinstantiable(av.params, av.name, av.args, at):
+                      return(nothing)
+                    else if is-appType(at) and list.any(fun(x): x end, at.args.map(fun(a): is-nameType(a) and params.member(a.name) end)):
+                      if not is-appType(av):
+                        arg-error := true
+                        add-error(l,
+                          msg(errArgumentBadType(counter, fmty(at), fmty(av))))
+                      else:
+                        sequence(for map2(a from at.args, v from av.args):
+                            if is-nameType(a) and params.member(a.name):
+                              cases(Option) map-get(param-inst, a):
+                                | none =>
+                                  param-inst := link(pair(a, v), param-inst)
+                                  return(nothing)
+                                | some(exist) =>
+                                  if not tyequal(exist, v):
+                                    arg-error := true
+                                    add-error(l,
+                                      msg(errArgumentBadType(counter, fmty(at), fmty(av))))
+                                  else:
+                                    return(nothing)
+                                  end
+                              end
+                            else:
+                              return(nothing)
+                            end
+                          end)
+                      end
+                    else:
+                      subtype(l, av, at)^bind(fun(res):
+                          if not res:
+                            arg-error := true
+                            add-error(l,
+                              msg(errArgumentBadType(counter, fmty(at), fmty(av))))
+                          else:
+                            return(nothing)
+                          end
+                        end)
+                    end
+                  end)^seq(block:
+                    if arg-error:
+                      return(dynType)
+                    else if is-nameType(ret-type) and params.member(ret-type.name):
+                      cases(Option) map-get(param-inst, ret-type):
+                        | none =>
+                          raise("tc: type checked a body at " + torepr(l) + " to return a type parameter not present in the arguments, which shouldn't be possible.")
+                        | some(t) => return(t)
+                      end
+                    else if is-appType(ret-type) and list.any(fun(x): x end, ret-type.args.map(fun(a): is-nameType(a) and params.member(a.name) end)):
+                      return(
+                        appType(ret-type.params, ret-type.name,
+                          for map(a from ret-type.args):
+                            cases(Option) map-get(param-inst, a):
+                              | none => a
+                              | some(t) => t
+                            end
+                          end))
+                    else:
+                      return(ret-type)
+                    end
+                  end)
+              end)
+          end
+          # NOTE(dbp 2013-10-16): Not really anything we can do. Odd, but...
+        | dynType => return(dynType)
+        | else =>
+          add-error(l, msg(errApplyNonFunction(fmty(fn-ty))))^seq(return(dynType))
+      end
+    end)
+end
+
 fun tc-cases(l :: Loc, _type :: A.Ann, val :: A.Expr, branches :: List<A.CasesBranch>, _branches-ty :: Type) -> TCST<Type>:
   fun tc-branch(branch, branches-ty) -> TCST<Type>:
     tc(branch.body)^bind(fun(branchty):
@@ -1438,7 +1822,7 @@ fun tc-cases(l :: Loc, _type :: A.Ann, val :: A.Expr, branches :: List<A.CasesBr
                             | arrowType(params, args, ret, rec) =>
                               # NOTE(dbp 2013-10-30): No subtyping - cases type
                               # must match constructors exactly (modulo records)
-                              if not tyequal(ret, type):
+                              if not (tyequal(ret, type) or (is-appType(ret) and tyinstantiable(params + ret.params, ret.name, ret.args, type))):
                                 add-error(branch.l,
                                   msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
                                   )^seq(return(dynType))
@@ -1475,6 +1859,7 @@ fun tc-cases(l :: Loc, _type :: A.Ann, val :: A.Expr, branches :: List<A.CasesBr
                                 tc-branch(branch, branches-ty)
                               end
                             | else =>
+                              print("didn't match ty: " + torepr(ty))
                               add-error(branch.l,
                                 msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
                                 )^seq(return(dynType))
@@ -1657,103 +2042,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                     end)^bind(fun(record):
                       return(anonType(record))
                     end)
-                | s_app(l, fn, args) =>
-                  tc(fn)^bind(fun(fn-ty):
-                      cases(Type) fn-ty:
-                        | arrowType(params, arg-types, ret-type, rec-type) =>
-                          if args.length() <> arg-types.length():
-                            add-error(l,
-                              msg(errArityMismatch(arg-types.length(), args.length())))^seq(
-                              return(dynType))
-                          else:
-                            sequence(args.map(tc))^bind(fun(arg-vals):
-                                var counter = 1
-                                var arg-error = false
-                                var param-inst = []
-                                sequence(
-                                  for map2(at from arg-types, av from arg-vals):
-                                    # NOTE(dbp 2013-11-04): If it is a type parameter, instantiate it greedily.
-                                    if is-nameType(at) and params.member(at.name):
-                                      cases(Option) map-get(param-inst, at):
-                                        | none =>
-                                          param-inst := link(pair(at, av), param-inst)
-                                          return(nothing)
-                                        | some(exist) =>
-                                          if not tyequal(exist, av):
-                                            arg-error := true
-                                            add-error(l,
-                                              msg(errArgumentBadType(counter, fmty(at), fmty(av))))
-                                          else:
-                                            return(nothing)
-                                          end
-                                      end
-                                    else if is-appType(at) and list.any(fun(x): x end, at.args.map(fun(a): is-nameType(a) and params.member(a.name) end)):
-                                      if not is-appType(av):
-                                        arg-error := true
-                                        add-error(l,
-                                          msg(errArgumentBadType(counter, fmty(at), fmty(av))))
-                                      else:
-                                        sequence(for map2(a from at.args, v from av.args):
-                                            if is-nameType(a) and params.member(a.name):
-                                              cases(Option) map-get(param-inst, a):
-                                                | none =>
-                                                  param-inst := link(pair(a, v), param-inst)
-                                                  return(nothing)
-                                                | some(exist) =>
-                                                  if not tyequal(exist, v):
-                                                    arg-error := true
-                                                    add-error(l,
-                                                      msg(errArgumentBadType(counter, fmty(at), fmty(av))))
-                                                  else:
-                                                    return(nothing)
-                                                  end
-                                              end
-                                            else:
-                                              return(nothing)
-                                            end
-                                          end)
-                                      end
-                                    else:
-                                      subtype(l, av, at)^bind(fun(res):
-                                          if not res:
-                                            arg-error := true
-                                            add-error(l,
-                                              msg(errArgumentBadType(counter, fmty(at), fmty(av))))
-                                          else:
-                                            return(nothing)
-                                          end
-                                        end)
-                                    end
-                                  end)^seq(block:
-                                    if arg-error:
-                                      return(dynType)
-                                    else if is-nameType(ret-type) and params.member(ret-type.name):
-                                      cases(Option) map-get(param-inst, ret-type):
-                                        | none =>
-                                          raise("tc: type checked a body at " + torepr(l) + " to return a type parameter not present in the arguments, which shouldn't be possible.")
-                                        | some(t) => return(t)
-                                      end
-                                    else if is-appType(ret-type) and list.any(fun(x): x end, ret-type.args.map(fun(a): is-nameType(a) and params.member(a.name) end)):
-                                      return(
-                                        appType(ret-type.params, ret-type.name,
-                                          for map(a from ret-type.args):
-                                            cases(Option) map-get(param-inst, a):
-                                              | none => a
-                                              | some(t) => t
-                                            end
-                                          end))
-                                    else:
-                                      return(ret-type)
-                                    end
-                                  end)
-                              end)
-                          end
-                          # NOTE(dbp 2013-10-16): Not really anything we can do. Odd, but...
-                        | dynType => return(dynType)
-                        | else =>
-                          add-error(l, msg(errApplyNonFunction(fmty(fn-ty))))^seq(return(dynType))
-                      end
-                    end)
+                | s_app(l, fn, args) => tc-app(l, fn, args)
                 | s_id(l, id) =>
                   get-env()^bind(fun(env):
                       cases(option.Option) map-get(env, id):
