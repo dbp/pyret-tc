@@ -594,11 +594,11 @@ fun tyinstantiable(params :: List<String>, name :: String, args :: List<Type>, t
         | empty => true
         | link(f, r) =>
           cases(Pair<String,String>) f:
-            | pair(left, right) =>
-              if left == right:
+            | pair(a, b) =>
+              if a == b:
                 constraints-satisfy(r)
-              else if params.member(left):
-                constraints-satisfy(r.map(replace(left, _)))
+              else if params.member(a):
+                constraints-satisfy(r.map(replace(a, _)))
               else:
                 false
               end
@@ -688,7 +688,13 @@ where:
     is anonType(moreRecord([pair("foo", my-type)]))
 end
 
-fun tysolve(vars :: List<String>, _eqs :: List<Pair<Type, Type>>, tys :: List<Type>) -> Option<List<Type>>:
+data TySolveRes:
+  | allSolved(l :: List<Type>)
+  | someSolved(l :: List<Type>)
+  | incompatible
+end
+
+fun tysolve(vars :: List<String>, _eqs :: List<Pair<Type, Type>>, tys :: List<Type>) -> TySolveRes:
   doc: "Solves for vars using eqs (by constraint generation/elimination) and uses those to substitute into tys.
         If all are not solved for, returning none. This is how we instantiate type parameters through local inference."
 
@@ -812,35 +818,17 @@ fun tysolve(vars :: List<String>, _eqs :: List<Pair<Type, Type>>, tys :: List<Ty
 
   fun consolve(cons :: List<Pair<String, Type>>) -> List<Pair<String,Type>>:
     doc: "Output has unique left sides, all in vars."
-    fun appears(v :: String, t :: Type) -> Bool:
-      fun rec-appears(_v :: String, r :: RecordType) -> Bool:
-        list.any(fun(x): x end, r.fields.map(_.b).map(appears(_v,_)))
-      end
-      cases(Type) t:
-        | nameType(name) => name == v
-        | anonType(rec) => rec-appears(v, rec)
-        | arrowType(params, args, ret, rec) =>
-          #TODO params
-          list.any(fun(x): x end, args.map(appears(v,_))) or appears(v, ret) or rec-appears(v, rec)
-        | methodType(params, self, args, ret, rec) =>
-          list.any(fun(x): x end, args.map(appears(v,_))) or  appears(v, self) or appears(v, ret) or rec-appears(v, rec)
-        | appType(params, name, args) =>
-          list.any(fun(x): x end, args.map(appears(v,_)))
-        | dynType => false
-        | anyType => false
-      end
-    end
     cases(List<Pair<String,Type>>) cons:
       | empty => empty
       | link(p, rest) =>
         cases(Pair<String, Type>) p:
-          | pair(left, right) =>
-            if nmty(left) == right:
+          | pair(a, b) =>
+            if nmty(a) == b:
               consolve(rest)
-            else if vars.member(left):
-              if appears(left, right):
+            else if vars.member(a):
+              if appears(a, b):
                 raise(nothing)
-              else if list.any(fun(x): x end, vars.map(appears(_, right))):
+              else if list.any(fun(x): x end, vars.map(appears(_, b))):
                 if (not Nothing(loop-point)) and identical(loop-point, p):
                   # don't go into infinite loops.
                   raise(nothing)
@@ -851,17 +839,17 @@ fun tysolve(vars :: List<String>, _eqs :: List<Pair<Type, Type>>, tys :: List<Ty
                   consolve(rest + [p])
                 end
               else:
-                link(pair(left, right), consolve(rest.map(fun(r):
-                        if r.a == left:
-                          if r.b == right:
+                link(pair(a, b), consolve(rest.map(fun(r):
+                        if r.a == a:
+                          if r.b == b:
                             pair(r.a, nmty(r.a))
                           else if is-nameType(r.b) and vars.member(r.b.name):
-                            pair(r.b.name, right)
+                            pair(r.b.name, b)
                           else:
                             raise(nothing)
                           end
                         else:
-                          pair(r.a, replace(left, right, r.b))
+                          pair(r.a, replace(a, b, r.b))
                         end
                       end)))
               end
@@ -869,6 +857,25 @@ fun tysolve(vars :: List<String>, _eqs :: List<Pair<Type, Type>>, tys :: List<Ty
               raise("tysolve: invariant violated - left side should be var.")
             end
         end
+    end
+  end
+
+  fun appears(v :: String, t :: Type) -> Bool:
+    fun rec-appears(_v :: String, r :: RecordType) -> Bool:
+      list.any(fun(x): x end, r.fields.map(_.b).map(appears(_v,_)))
+    end
+    cases(Type) t:
+      | nameType(name) => name == v
+      | anonType(rec) => rec-appears(v, rec)
+      | arrowType(params, args, ret, rec) =>
+        #TODO params
+        list.any(fun(x): x end, args.map(appears(v,_))) or appears(v, ret) or rec-appears(v, rec)
+      | methodType(params, self, args, ret, rec) =>
+        list.any(fun(x): x end, args.map(appears(v,_))) or  appears(v, self) or appears(v, ret) or rec-appears(v, rec)
+      | appType(params, name, args) =>
+        list.any(fun(x): x end, args.map(appears(v,_)))
+      | dynType => false
+      | anyType => false
     end
   end
 
@@ -899,67 +906,76 @@ fun tysolve(vars :: List<String>, _eqs :: List<Pair<Type, Type>>, tys :: List<Ty
     end
   end
 
-  fun conreplace(sols :: List<Pair<String,Type>>, _tys :: List<Type>) -> List<Type>:
-    for fold(acc from _tys, sol from sols):
+  fun conreplace(sols :: List<Pair<String,Type>>, _tys :: List<Type>) -> TySolveRes:
+    replaced = for fold(acc from _tys, sol from sols):
       acc.map(replace(sol.a, sol.b, _))
+    end
+    if list.any(fun(x): x end, replaced.map(fun(r): list.any(fun(x): x end, vars.map(appears(_, r))) end)):
+      someSolved(for fold(acc from replaced, v from vars):
+          acc.map(replace(v, dynType, _))
+        end)
+    else:
+      allSolved(replaced)
     end
   end
 
   try:
-    _eqs^congen()^consolve()^conreplace(tys)^some()
+    _eqs^congen()^consolve()^conreplace(tys)
   except(e):
     if e == nothing:
-      none
+      incompatible
     else:
       raise(e)
     end
   end
 where:
   tysolve(["T"], [pair(appType([], "Foo", [nmty("T")]), appty("Foo", ["String"]))],
-    [appType([], "Bar", [nmty("T")])]) is some([appty("Bar", ["String"])])
+    [appType([], "Bar", [nmty("T")])]) is allSolved([appty("Bar", ["String"])])
 
   tysolve(["T"], [pair(nmty("T"), appty("Foo", ["String"]))],
-    [appType([], "Bar", [nmty("T")])]) is some([appty("Bar", [appty("Foo", ["String"])])])
+    [appType([], "Bar", [nmty("T")])]) is allSolved([appty("Bar", [appty("Foo", ["String"])])])
 
   tysolve(["T"], [pair(appty("Foo", ["T"]), appty("Foo", ["String"])),
     pair(nmty("T"), nmty("String"))],
-    [appType([], "Bar", [nmty("T")]), nmty("U")]) is some([appty("Bar", ["String"]), nmty("U")])
+    [appType([], "Bar", [nmty("T")]), nmty("U")]) is allSolved([appty("Bar", ["String"]), nmty("U")])
 
-  tysolve(["T"], [pair(nmty("T"), nmty("Number")), pair(nmty("T"), nmty("String"))], []) is none
+  tysolve(["T"], [pair(nmty("T"), nmty("Number")), pair(nmty("T"), nmty("String"))], []) is incompatible
 
   tysolve(["T", "U"], [pair(nmty("U"), nmty("Number")),
-      pair(anonType(moreRecord([pair("f", nmty("T"))])), nmty("String"))], []) is none
+      pair(anonType(moreRecord([pair("f", nmty("T"))])), nmty("String"))], []) is incompatible
 
   tysolve(["T", "U"], [pair(nmty("U"), nmty("Number")),
       pair(anonType(moreRecord([pair("f", nmty("T"))])), anonType(moreRecord([pair("f", nmty("String"))])))],
-    [nmty("U"), nmty("T")]) is some([nmty("Number"), nmty("String")])
+    [nmty("U"), nmty("T")]) is allSolved([nmty("Number"), nmty("String")])
 
   tysolve(["T", "U"], [pair(nmty("T"), nmty("U")), pair(nmty("T"), nmty("String"))], [nmty("U")])
-  is some([nmty("String")])
+  is allSolved([nmty("String")])
 
-  tysolve(["T", "U"], [pair(nmty("T"), nmty("U")), pair(nmty("U"), nmty("T"))], [nmty("U")]) is none
+  tysolve(["T", "U"], [pair(nmty("T"), nmty("U")), pair(nmty("U"), nmty("T"))], [nmty("U")]) is incompatible
 
-  tysolve(["T", "U"], [pair(nmty("T"), nmty("U")), pair(nmty("U"), nmty("T"))], [nmty("U")]) is none
-
-  tysolve(["T"], [pair(arrowType([], [nmty("T")], appty("Foo", ["T"]), moreRecord([])),
-        arrowType([], [nmty("Bool")], appty("Foo", ["String"]), moreRecord([])))], []) is none
+  tysolve(["T", "U"], [pair(nmty("T"), nmty("U")), pair(nmty("U"), nmty("T"))], [nmty("U")]) is incompatible
 
   tysolve(["T"], [pair(arrowType([], [nmty("T")], appty("Foo", ["T"]), moreRecord([])),
-        arrowType([], [nmty("Bool")], appty("Foo", ["Bool"]), moreRecord([])))], [nmty("T")]) is some([nmty("Bool")])
+        arrowType([], [nmty("Bool")], appty("Foo", ["String"]), moreRecord([])))], [appty("Foo", ["T"])]) is incompatible
 
-  tysolve(["T"], [pair(nmty("T"), appty("Option", ["T"]))], []) is none
+  tysolve(["T"], [pair(arrowType([], [nmty("T")], appty("Foo", ["T"]), moreRecord([])),
+        arrowType([], [nmty("Bool")], appty("Foo", ["Bool"]), moreRecord([])))], [nmty("T")]) is allSolved([nmty("Bool")])
 
-  tysolve(["T"], [pair(nmty("String"), appty("Option", ["T"]))], []) is none
+  tysolve(["T"], [pair(nmty("T"), appty("Option", ["T"]))], []) is incompatible
 
-  tysolve(["T"], [pair(nmty("String"), appty("Option", ["Number"]))], []) is none
+  tysolve(["T"], [pair(nmty("String"), appty("Option", ["T"]))], []) is incompatible
 
-  tysolve(["T"], [pair(nmty("U"), appty("Option", ["Number"]))], [nmty("T")]) is none
+  tysolve(["T"], [pair(nmty("String"), appty("Option", ["Number"]))], []) is incompatible
+
+  tysolve(["T"], [pair(nmty("U"), appty("Option", ["Number"]))], [nmty("T")]) is incompatible
 
   tysolve(["T", "U"], [pair(nmty("T"), appty("Foo", [appty("Bar", ["U"])])),
                             pair(nmty("String"), nmty("U"))],
-    [nmty("T"), nmty("U")]) is some([appty("Foo", [appty("Bar", ["String"])]), nmty("String")])
+    [nmty("T"), nmty("U")]) is allSolved([appty("Foo", [appty("Bar", ["String"])]), nmty("String")])
 
-  tysolve(["T"], [pair(appty("Foo", ["T"]), appty("Foo", [anyType]))], [nmty("T")]) is some([anyType])
+  tysolve(["T"], [pair(appty("Foo", ["T"]), appty("Foo", [anyType]))], [nmty("T")]) is allSolved([anyType])
+
+  tysolve(["T", "U"], [pair(nmty("T"), nmty("String"))], [nmty("T"), nmty("U")]) is someSolved([nmty("String"), dynType])
 end
 
 
@@ -1128,16 +1144,16 @@ fun is-inferred-functions(ast :: A.Expr) -> TCST<List<Pair<String, Type>>>:
   fun find-is-pairs(name :: String, e :: A.Expr) -> TCST<List<Type>>:
     cases(A.Expr) e:
       | s_block(l, stmts) => sequence(stmts.map(find-is-pairs(name, _)))^bind(fun(ps): return(concat(ps)) end)
-      | s_check_test(l, op, left, right) =>
+      | s_check_test(_, op, l, r) =>
         if op == "opis":
           # NOTE(dbp 2013-10-21): Really simple for now - only if it
           # is of form funname(args) is bar.
-          cases(A.Expr) left:
+          cases(A.Expr) l:
             | s_app(l1, fn, args) =>
               cases(A.Expr) fn:
                 | s_id(l2, fname) =>
                   if fname == name:
-                    tc(right)^bind(fun(rightty):
+                    tc(r)^bind(fun(rightty):
                         sequence(args.map(tc))^bind(fun(argsty):
                             return([arrowType([],argsty, rightty, moreRecord([]))])
                           end)
