@@ -436,11 +436,18 @@ where:
   [23, 123, 1023].map(fun(n): ordinalize(n) is tostring(n) + "rd" end)
 end
 
-fun<A> zip2(l1 :: List<A>, l2 :: List<B>) -> List<Pair<A,B>>:
+fun<A> zip2(_l1 :: List<A>, _l2 :: List<B>) -> List<Pair<A,B>>:
   doc: "Will fail if the second list is shorter than first."
-  cases(List<A>) l1:
-    | empty => empty
-    | link(f, r) => link(pair(f, l2.first), zip2(r, l2.rest))
+  fun zip2h(l1, l2):
+    cases(List<A>) l1:
+      | empty => empty
+      | link(f, r) => link(pair(f, l2.first), zip2(r, l2.rest))
+    end
+  end
+  if _l1.length() <> _l2.length():
+    raise("zip2: arguments not of the same length: " + torepr(_l1) + " and " + torepr(_l2))
+  else:
+    zip2h(_l1, _l2)
   end
 end
 
@@ -1702,16 +1709,22 @@ fun tc-app(l :: Loc, fn :: A.Expr, args :: List<A.Expr>) -> TCST<Type>:
         | bigLamType(params, ty1) =>
           cases(Type) ty1:
             | arrowType(arg-types, ret-type, rec-type) =>
-              sequence(args.map(tc))^bind(fun(arg-vals):
-                  cases(TySolveRes) tysolve(params, zip2(arg-types, arg-vals), [ret-type]):
-                    | allSolved(vs) => return(vs.first)
-                    | someSolved(vs) =>
-                      # NOTE(dbp 2013-11-09): Add warning - ret type has dynType due to underspecification
-                      return(vs.first)
-                    | incompatible =>
-                      add-error(l, msg(errFunctionArgumentsIncompatible(fmty(ty1), arg-vals.map(fmty))))^seq(return(dynType))
-                  end
-                end)
+              if args.length() <> arg-types.length():
+                add-error(l,
+                  msg(errArityMismatch(arg-types.length(), args.length())))^seq(
+                  return(dynType))
+              else:
+                sequence(args.map(tc))^bind(fun(arg-vals):
+                    cases(TySolveRes) tysolve(params, zip2(arg-types, arg-vals), [ret-type]):
+                      | allSolved(vs) => return(vs.first)
+                      | someSolved(vs) =>
+                        # NOTE(dbp 2013-11-09): Add warning - ret type has dynType due to underspecification
+                        return(vs.first)
+                      | incompatible =>
+                        add-error(l, msg(errFunctionArgumentsIncompatible(fmty(ty1), arg-vals.map(fmty))))^seq(return(dynType))
+                    end
+                  end)
+              end
             | else =>
               add-error(l, msg(errApplyNonFunction(fmty(fn-ty))))^seq(return(dynType))
           end
@@ -1743,116 +1756,114 @@ fun tc-cases(l :: Loc, _type :: A.Ann, val :: A.Expr, branches :: List<A.CasesBr
     fun(type):
       tc(val)^bind(
         fun(val-ty):
-          subtype(l, type, val-ty)^bind(fun(st):
-              if not st:
-                add-error(l,
-                  msg(errCasesValueBadType(fmty(type), fmty(val-ty)))
-                  )^seq(return(dynType))
-              else:
-                get-env()^bind(
-                  fun(env):
-                    for foldm(branches-ty from _branches-ty, branch from branches):
-                      # TODO(dbp 2013-10-30): Need to have a data-env, so we can
-                      # pick up non-bound constructors.
-                      cases(Option) map-get(env, branch.name):
-                        | none => add-error(branch.l,
-                            msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
-                            )^seq(return(dynType))
-                        | some(ty) =>
-                          cases(Type) ty:
+          if not tycompat(type, val-ty):
+            add-error(l,
+              msg(errCasesValueBadType(fmty(type), fmty(val-ty)))
+              )^seq(return(dynType))
+          else:
+            get-env()^bind(
+              fun(env):
+                for foldm(branches-ty from _branches-ty, branch from branches):
+                  # TODO(dbp 2013-10-30): Need to have a data-env, so we can
+                  # pick up non-bound constructors.
+                  cases(Option) map-get(env, branch.name):
+                    | none => add-error(branch.l,
+                        msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
+                        )^seq(return(dynType))
+                    | some(ty) =>
+                      cases(Type) ty:
+                        | arrowType(args, ret, rec) =>
+                          # NOTE(dbp 2013-10-30): No subtyping - cases type
+                          # must match constructors exactly (modulo records)
+                          if not tyequal(ret, type):
+                            add-error(branch.l,
+                              msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
+                              )^seq(return(dynType))
+                          else if args.length() <> branch.args.length():
+                            add-error(branch.l,
+                              msg(errCasesPatternNumberFields(branch.name, args.length(), branch.args.length()))
+                              )^seq(return(dynType))
+                          else:
+                            # NOTE(dbp 2013-10-30): We want to check that
+                            # branches have the same type.  This is slightly
+                            # tricky, so we'll opt for a temporary but dynless solution -
+                            # set it to the first branches type, and make
+                            # sure all the rest are equal.
+                            add-bindings(for map2(bnd from branch.args,
+                                  argty from args):
+                                pair(bnd.id, argty)
+                              end,
+                              tc-branch(branch, branches-ty))
+                          end
+                        | nameType(_) =>
+                          if not tyequal(ty, type):
+                            add-error(branch.l,
+                              msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
+                              )^seq(return(dynType))
+                          else:
+                            tc-branch(branch, branches-ty)
+                          end
+                        | appType(_,_) =>
+                          if not tyequal(ty, type):
+                            add-error(branch.l,
+                              msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
+                              )^seq(return(dynType))
+                          else:
+                            tc-branch(branch, branches-ty)
+                          end
+                        | bigLamType(params, ty1) =>
+                          cases(Type) ty1:
                             | arrowType(args, ret, rec) =>
-                              # NOTE(dbp 2013-10-30): No subtyping - cases type
-                              # must match constructors exactly (modulo records)
-                              if not tyequal(ret, type):
-                                add-error(branch.l,
-                                  msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
-                                  )^seq(return(dynType))
-                              else if args.length() <> branch.args.length():
-                                add-error(branch.l,
-                                  msg(errCasesPatternNumberFields(branch.name, args.length(), branch.args.length()))
-                                  )^seq(return(dynType))
-                              else:
-                                # NOTE(dbp 2013-10-30): We want to check that
-                                # branches have the same type.  This is slightly
-                                # tricky, so we'll opt for a temporary but dynless solution -
-                                # set it to the first branches type, and make
-                                # sure all the rest are equal.
-                                add-bindings(for map2(bnd from branch.args,
-                                      argty from args):
-                                    pair(bnd.id, argty)
-                                  end,
-                                  tc-branch(branch, branches-ty))
-                              end
-                            | nameType(_) =>
-                              if not tyequal(ty, type):
-                                add-error(branch.l,
-                                  msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
-                                  )^seq(return(dynType))
-                              else:
-                                tc-branch(branch, branches-ty)
-                              end
-                            | appType(_,_) =>
-                              if not tyequal(ty, type):
-                                add-error(branch.l,
-                                  msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
-                                  )^seq(return(dynType))
-                              else:
-                                tc-branch(branch, branches-ty)
-                              end
-                            | bigLamType(params, ty1) =>
-                              cases(Type) ty1:
-                                | arrowType(args, ret, rec) =>
-                                  cases(TySolveRes) tysolve(params, [pair(ret, type)], args):
-                                    | allSolved(args-resolved) =>
-                                      add-bindings(for map2(bnd from branch.args,
-                                            argty from args-resolved):
-                                          pair(bnd.id, argty)
-                                        end,
-                                        tc-branch(branch, branches-ty))
-                                    | someSolved(args-resolved) =>
-                                      add-bindings(for map2(bnd from branch.args,
-                                            argty from args-resolved):
-                                          pair(bnd.id, argty)
-                                        end,
-                                        tc-branch(branch, branches-ty))
-                                    | incompatible =>
-                                      add-error(branch.l,
-                                        msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
-                                        )^seq(return(dynType))
-                                  end
-                                | nameType(_) =>
-                                  cases(TySolveRes) tysolve(params, [pair(ty1, type)], params.map(nmty)):
-                                    | incompatible =>
-                                      add-error(branch.l,
-                                        msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
-                                        )^seq(return(dynType))
-                                    | else =>
-                                      tc-branch(branch, branches-ty)
-                                  end
-                                | appType(_, _) =>
-                                  cases(TySolveRes) tysolve(params, [pair(ty1, type)], params.map(nmty)):
-                                    | incompatible =>
-                                      add-error(branch.l,
-                                        msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
-                                        )^seq(return(dynType))
-                                    | else =>
-                                      tc-branch(branch, branches-ty)
-                                  end
-                                | else =>
+                              cases(TySolveRes) tysolve(params, [pair(ret, type)], args):
+                                | allSolved(args-resolved) =>
+                                  add-bindings(for map2(bnd from branch.args,
+                                        argty from args-resolved):
+                                      pair(bnd.id, argty)
+                                    end,
+                                    tc-branch(branch, branches-ty))
+                                | someSolved(args-resolved) =>
+                                  add-bindings(for map2(bnd from branch.args,
+                                        argty from args-resolved):
+                                      pair(bnd.id, argty)
+                                    end,
+                                    tc-branch(branch, branches-ty))
+                                | incompatible =>
                                   add-error(branch.l,
                                     msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
                                     )^seq(return(dynType))
+                              end
+                            | nameType(_) =>
+                              cases(TySolveRes) tysolve(params, [pair(ty1, type)], params.map(nmty)):
+                                | incompatible =>
+                                  add-error(branch.l,
+                                    msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
+                                    )^seq(return(dynType))
+                                | else =>
+                                  tc-branch(branch, branches-ty)
+                              end
+                            | appType(_, _) =>
+                              cases(TySolveRes) tysolve(params, [pair(ty1, type)], params.map(nmty)):
+                                | incompatible =>
+                                  add-error(branch.l,
+                                    msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
+                                    )^seq(return(dynType))
+                                | else =>
+                                  tc-branch(branch, branches-ty)
                               end
                             | else =>
                               add-error(branch.l,
                                 msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
                                 )^seq(return(dynType))
                           end
+                        | else =>
+                          add-error(branch.l,
+                            msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
+                            )^seq(return(dynType))
                       end
-                    end
-                  end)
-              end
-            end)
+                  end
+                end
+              end)
+          end
         end)
     end)
 end
