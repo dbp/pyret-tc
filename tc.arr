@@ -642,6 +642,10 @@ fun appears(v :: String, t :: Type) -> Bool:
       list.any(fun(x): x end, args.map(appears(v,_))) or  appears(v, self) or appears(v, ret) or rec-appears(v, rec)
     | appType(name, args) =>
       list.any(fun(x): x end, args.map(appears(v,_)))
+    | bigLamType(params, type) =>
+      if params.member(v): false
+      else: appears(v, t)
+      end
     | dynType => false
     | anyType => false
   end
@@ -666,6 +670,10 @@ fun replace(v :: String, nt :: Type, t :: Type) -> Type:
       methodType(replace(v,nt,self), args.map(replace(v,nt,_)), replace(v,nt,ret), rec-replace(v,nt, rec))
     | appType(name, args) =>
       appType(name, args.map(replace(v,nt,_)))
+    | bigLamType(params, type) =>
+      if params.member(v): t
+      else: bigLamType(params, replace(v, nt, type))
+      end
     | dynType => false
     | anyType => false
   end
@@ -1019,7 +1027,8 @@ fun get-bindings(ast :: A.Expr) -> TCST<List<Pair<String, Type>>>:
           # NOTE(dbp 2013-11-07): This seems buggy - we want to type check
           # it if it is something simple (like a number, string, application),
           # but not if it can have things like functions in it.
-          tc(val)^bind(fun(ty): return([pair(name.id, ty)]) end)
+          add-bindings([pair(name.id, dynType)],
+            tc(val)^bind(fun(ty): return([pair(name.id, ty)]) end))
       end
     else:
       get-type(name.ann)^bind(fun(ty): return([pair(name.id, ty)]) end)
