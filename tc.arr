@@ -914,7 +914,7 @@ fun get-bindings(ast :: A.Expr) -> TCST<List<Pair<String, Type>>>:
           bind-params(ps,
             sequence(args.map(fun(b): get-type(b.ann) end))^bind(fun(arg-tys):
                 get-type(ann)^bind(fun(ret-ty):
-                    return([pair(name.id, arrowType(ps, arg-tys, ret-ty, moreRecord([])))])
+                    return([pair(name.id, params-wrap(ps, arrowType(arg-tys, ret-ty, moreRecord([]))))])
                   end)
               end)
             )
@@ -1543,17 +1543,17 @@ fun tc-main(p, s):
   env = [
     pair("list", anonType(
         moreRecord([
-            pair("map", arrowType(["U", "T"], [arrowType([nmty("T")], nmty("U"), moreRecord([])), appty("List", ["T"])], appty("List", ["U"]), moreRecord([]))),
-            pair("link", arrowType(["T"],[nmty("T"), appty("List", ["T"])], appty("List", ["T"]), moreRecord([]))),
-            pair("empty", appType(["T"], "List", [nmty("T")]))
+            pair("map", bigLamType(["U", "T"], arrowType([arrowType([nmty("T")], nmty("U"), moreRecord([])), appty("List", ["T"])], appty("List", ["U"]), moreRecord([])))),
+            pair("link", bigLamType(["T"], arrowType([nmty("T"), appty("List", ["T"])], appty("List", ["T"]), moreRecord([])))),
+            pair("empty", bigLamType(["T"], appType("List", [nmty("T")])))
           ]))),
     pair("builtins", anonType(moreRecord([]))),
     pair("error", anonType(moreRecord([]))),
-    pair("link", arrowType(["T"],[nmty("T"), appty("List", ["T"])], appty("List", ["T"]), moreRecord([]))),
-    pair("empty", appType(["T"], "List", [nmty("T")])),
+    pair("link", bigLamType(["T"], arrowType([nmty("T"), appty("List", ["T"])], appty("List", ["T"]), moreRecord([])))),
+    pair("empty", bigLamType(["T"], appType("List", [nmty("T")]))),
     pair("nothing", nmty("Nothing")),
-    pair("some", arrowType(["T"], [nmty("T")], appty("Option", ["T"]), moreRecord([]))),
-    pair("none", appType(["T"], "Option", [nmty("T")])),
+    pair("some", bigLamType(["T"], arrowType([nmty("T")], appty("Option", ["T"]), moreRecord([])))),
+    pair("none", bigLamType(["T"], appType("Option", [nmty("T")]))),
     pair("true", nmty("Bool")),
     pair("false", nmty("Bool")),
     pair("print", arrowType([anyType], nmty("Nothing"), moreRecord([]))),
@@ -1634,12 +1634,12 @@ fun tc-app(l :: Loc, fn :: A.Expr, args :: List<A.Expr>) -> TCST<Type>:
                     subtype(l, ap.b, ap.a)^bind(fun(res):
                         if not res:
                           add-error(l,
-                            msg(errArgumentBadType(base.a, fmty(ap.a), fmty(ap.b))))^seq(return(base.a + 1, dynType))
+                            msg(errArgumentBadType(base.a, fmty(ap.a), fmty(ap.b))))^seq(return(pair(base.a + 1, dynType)))
                         else:
                           return(pair(base.a + 1, base.b))
                         end
                       end)
-                  end)
+                  end)^bind(fun(p): return(p.b) end)
               end)
           end
           # NOTE(dbp 2013-10-16): Not really anything we can do. Odd, but...
@@ -1860,7 +1860,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                               tc(body)^bind(fun(body-ty):
                                   subtype(l, body-ty, ret-ty)^bind(fun(st):
                                       if st:
-                                        return(arrowType(ps, new-binds.map(fun(bnd): bnd.b end), ret-ty, moreRecord([])))
+                                        return(params-wrap(ps, arrowType(new-binds.map(fun(bnd): bnd.b end), ret-ty, moreRecord([]))))
                                       else:
                                         add-error(l,
                                           msg(errFunctionAnnIncompatibleReturn(fmty(body-ty), fmty(ret-ty))))^seq(
@@ -1954,15 +1954,17 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                             end
                           end)
                       end
-                      tc(obj)^bind(fun(obj-ty):
-                          cases(Type) obj-ty:
-                            | dynType => return(dynType)
-                            | anyType => return(dynType)
-                            | appType(_,_) => return(dynType)
-                            | anonType(record) => record-lookup(record)
-                            | nameType(_) => record-name-lookup(obj-ty)
-                          end
-                        end)
+                      fun rec-loo-help(obj-ty):
+                        cases(Type) obj-ty:
+                          | dynType => return(dynType)
+                          | anyType => return(dynType)
+                          | appType(_,_) => return(dynType)
+                          | anonType(record) => record-lookup(record)
+                          | nameType(_) => record-name-lookup(obj-ty)
+                          | bigLamType(_,t) => rec-loo-help(t)
+                        end
+                      end
+                      tc(obj)^bind(rec-loo-help)
                     | else =>
                       # NOTE(dbp 2013-10-21): Actually type check field to see if
                       # it is a String or Dyn
