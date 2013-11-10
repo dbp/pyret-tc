@@ -573,7 +573,7 @@ fun appears(v :: String, t :: Type) -> Bool:
       list.any(fun(x): x end, args.map(appears(v,_)))
     | bigLamType(params, type) =>
       if params.member(v): false
-      else: appears(v, t)
+      else: appears(v, type)
       end
     | dynType => false
     | anyType => false
@@ -1001,7 +1001,7 @@ fun get-variant-bindings(tname :: String, tparams :: List<String>, variant :: A.
                                      A.is-s_datatype_variant(v) or
                                      A.is-s_datatype_singleton_variant(v) end)) ->
     TCST<List<Pair<String, Type>>>:
-  bigty = nmty(tname)
+  bigty = if tparams == []: nmty(tname) else: appty(tname, tparams) end
   boolty = nmty("Bool")
   fun get-member-type(m): get-type(m.bind.ann) end
   cases(A.Variant) variant:
@@ -1582,7 +1582,9 @@ fun tc-main(p, s):
             pair("link", bigLamType(["T"], arrowType([nmty("T"), appty("List", ["T"])], appty("List", ["T"]), moreRecord([])))),
             pair("empty", bigLamType(["T"], appType("List", [nmty("T")])))
           ]))),
-    pair("builtins", anonType(moreRecord([]))),
+    pair("builtins", anonType(moreRecord([
+            pair("equiv", arrowType([nmty("Any"), nmty("Any")], nmty("Bool"), moreRecord([])))
+          ]))),
     pair("error", anonType(moreRecord([]))),
     pair("link", bigLamType(["T"], arrowType([nmty("T"), appty("List", ["T"])], appty("List", ["T"]), moreRecord([])))),
     pair("empty", bigLamType(["T"], appType("List", [nmty("T")]))),
@@ -1966,59 +1968,91 @@ fun tc-cases(l :: Loc, _type :: A.Ann, val :: A.Expr, branches :: List<A.CasesBr
             get-env()^bind(
               fun(env):
                 tc-branches(branches.map(fun(branch):
-                      cases(Option) map-get(env, branch.name):
-                        | none => add-error(branch.l,
-                            msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
-                            )^seq(return(dynType))
-                        | some(ty) =>
-                          cases(Type) ty:
-                            | arrowType(args, ret, rec) =>
-                              if args.length() <> branch.args.length():
-                                add-error(branch.l,
-                                  msg(errCasesPatternNumberFields(branch.name, args.length(), branch.args.length()))
-                                  )^seq(return(dynType))
-                              else:
-                                add-bindings(for map2(bnd from branch.args,
-                                      argty from args):
-                                    pair(bnd.id, argty)
-                                  end,
-                                  branch-check([], type, ret, branch))
-                              end
-                            | nameType(_) => branch-check([], type, ty, branch)
-                            | appType(_,_) => branch-check([], type, ty, branch)
-                            | bigLamType(params, ty1) =>
-                              cases(Type) ty1:
-                                | arrowType(args, ret, rec) =>
-                                  # rename any params that appear in type. this needs to happen in ret and args.
-                                  cases(RenameRes) rename-params(params, [type], [arrowType(args, ret, moreRecord([]))]):
-                                    | renameRes(new-params, new-types) =>
-                                      new-arr = new-types.first
-                                      solved = tysolve(new-params, [pair(new-arr.ret, type)], new-arr.args)
-                                      cases(TySolveRes) solved:
-                                        | incompatible =>
-                                          add-error(branch.l,
-                                            msg(errCasesBranchInvalidVariant(fmty(type), branch.name, fmty(ty)))
-                                            )^seq(return(dynType))
-                                        | else =>
-                                          add-bindings(for map2(bnd from branch.args,
-                                                argty from solved.l):
-                                              pair(bnd.id, argty)
-                                            end,
-                                            tc(branch.body))
-                                      end
-                                  end
-                                | nameType(_) => branch-check(params, type, ty1, branch)
-                                | appType(_, _) => branch-check(params, type, ty1, branch)
-                                | else =>
+                      if branch.name == "%else":
+                        tc(branch.body)
+                      else:
+                        cases(Option) map-get(env, branch.name):
+                          | none => add-error(branch.l,
+                              msg(errCasesBranchInvalidVariant(fmty(type), branch.name, "Unknown"))
+                              )^seq(return(dynType))
+                          | some(ty) =>
+                            cases(Type) ty:
+                              | arrowType(args, ret, rec) =>
+                                if args.length() <> branch.args.length():
                                   add-error(branch.l,
-                                    msg(errCasesBranchInvalidVariant(fmty(type), branch.name, fmty(ty)))
+                                    msg(errCasesPatternNumberFields(branch.name, 0, branch.args.length()))
                                     )^seq(return(dynType))
-                              end
-                            | else =>
-                              add-error(branch.l,
-                                msg(errCasesBranchInvalidVariant(fmty(type), branch.name, fmty(ty)))
-                                )^seq(return(dynType))
-                          end
+                                else:
+                                  add-bindings(for map2(bnd from branch.args,
+                                        argty from args):
+                                      pair(bnd.id, argty)
+                                    end,
+                                    branch-check([], type, ret, branch))
+                                end
+                              | nameType(_) =>
+                                if branch.args.length() <> 0:
+                                  add-error(branch.l,
+                                    msg(errCasesPatternNumberFields(branch.name, 0, branch.args.length()))
+                                    )^seq(return(dynType))
+                                else:
+                                  branch-check([], type, ty, branch)
+                                end
+                              | appType(_,_) =>
+                                if branch.args.length() <> 0:
+                                  add-error(branch.l,
+                                    msg(errCasesPatternNumberFields(branch.name, 0, branch.args.length()))
+                                    )^seq(return(dynType))
+                                else:
+                                  branch-check([], type, ty, branch)
+                                end
+                              | bigLamType(params, ty1) =>
+                                cases(Type) ty1:
+                                  | arrowType(args, ret, rec) =>
+                                    # rename any params that appear in type. this needs to happen in ret and args.
+                                    cases(RenameRes) rename-params(params, [type], [arrowType(args, ret, moreRecord([]))]):
+                                      | renameRes(new-params, new-types) =>
+                                        new-arr = new-types.first
+                                        solved = tysolve(new-params, [pair(new-arr.ret, type)], new-arr.args)
+                                        cases(TySolveRes) solved:
+                                          | incompatible =>
+                                            add-error(branch.l,
+                                              msg(errCasesBranchInvalidVariant(fmty(type), branch.name, fmty(ty)))
+                                              )^seq(return(dynType))
+                                          | else =>
+                                            add-bindings(for map2(bnd from branch.args,
+                                                  argty from solved.l):
+                                                pair(bnd.id, argty)
+                                              end,
+                                              tc(branch.body))
+                                        end
+                                    end
+                                  | nameType(_) =>
+                                    if branch.args.length() <> 0:
+                                      add-error(branch.l,
+                                        msg(errCasesPatternNumberFields(branch.name, 0, branch.args.length()))
+                                        )^seq(return(dynType))
+                                    else:
+                                      branch-check(params, type, ty1, branch)
+                                    end
+                                  | appType(_, _) =>
+                                    if branch.args.length() <> 0:
+                                      add-error(branch.l,
+                                        msg(errCasesPatternNumberFields(branch.name, 0, branch.args.length()))
+                                        )^seq(return(dynType))
+                                    else:
+                                      branch-check(params, type, ty1, branch)
+                                    end
+                                  | else =>
+                                    add-error(branch.l,
+                                      msg(errCasesBranchInvalidVariant(fmty(type), branch.name, fmty(ty)))
+                                      )^seq(return(dynType))
+                                end
+                              | else =>
+                                add-error(branch.l,
+                                  msg(errCasesBranchInvalidVariant(fmty(type), branch.name, fmty(ty)))
+                                  )^seq(return(dynType))
+                            end
+                        end
                       end
                     end))^bind(fun(branchres):
                     cases(TCBranchRes) branchres:
