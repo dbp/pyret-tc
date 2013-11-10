@@ -1783,6 +1783,58 @@ fun tc-cases(l :: Loc, _type :: A.Ann, val :: A.Expr, branches :: List<A.CasesBr
                               else:
                                 tc-branch(branch, branches-ty)
                               end
+                            | appType(_,_) =>
+                              if not tyequal(ty, type):
+                                add-error(branch.l,
+                                  msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
+                                  )^seq(return(dynType))
+                              else:
+                                tc-branch(branch, branches-ty)
+                              end
+                            | bigLamType(params, ty1) =>
+                              cases(Type) ty1:
+                                | arrowType(args, ret, rec) =>
+                                  cases(TySolveRes) tysolve(params, [pair(ret, type)], args):
+                                    | allSolved(args-resolved) =>
+                                      add-bindings(for map2(bnd from branch.args,
+                                            argty from args-resolved):
+                                          pair(bnd.id, argty)
+                                        end,
+                                        tc-branch(branch, branches-ty))
+                                    | someSolved(args-resolved) =>
+                                      add-bindings(for map2(bnd from branch.args,
+                                            argty from args-resolved):
+                                          pair(bnd.id, argty)
+                                        end,
+                                        tc-branch(branch, branches-ty))
+                                    | incompatible =>
+                                      add-error(branch.l,
+                                        msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
+                                        )^seq(return(dynType))
+                                  end
+                                | nameType(_) =>
+                                  cases(TySolveRes) tysolve(params, [pair(ty1, type)], params.map(nmty)):
+                                    | incompatible =>
+                                      add-error(branch.l,
+                                        msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
+                                        )^seq(return(dynType))
+                                    | else =>
+                                      tc-branch(branch, branches-ty)
+                                  end
+                                | appType(_, _) =>
+                                  cases(TySolveRes) tysolve(params, [pair(ty1, type)], params.map(nmty)):
+                                    | incompatible =>
+                                      add-error(branch.l,
+                                        msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
+                                        )^seq(return(dynType))
+                                    | else =>
+                                      tc-branch(branch, branches-ty)
+                                  end
+                                | else =>
+                                  add-error(branch.l,
+                                    msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
+                                    )^seq(return(dynType))
+                              end
                             | else =>
                               add-error(branch.l,
                                 msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
@@ -2003,7 +2055,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                             end
                         end
                       end
-                      fun record-name-lookup(name):
+                      fun record-type-lookup(name):
                         get-type-env()^bind(fun(type-env):
                             cases(Option) map-get(type-env, name):
                               | none => add-error(l, msg(errTypeNotDefined(fmty(name))))^seq(return(dynType))
@@ -2014,7 +2066,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                                   | dynType => return(dynType)
                                   | appType(_,_,_) => return(dynType)
                                     # NOTE(dbp 2013-11-05): Not doing cycle detection in type env. Could go into an infinite loop.
-                                  | nameType(_) => record-name-lookup(recordbind.type)
+                                  | nameType(_) => record-type-lookup(recordbind.type)
                                 end
                             end
                           end)
@@ -2025,8 +2077,8 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                           | anyType => return(dynType)
                           | appType(_,_) => return(dynType)
                           | anonType(record) => record-lookup(record)
-                          | nameType(_) => record-name-lookup(obj-ty)
-                          | bigLamType(_,t) => rec-loo-help(t)
+                          | nameType(_) => record-type-lookup(obj-ty)
+                          | bigLamType(params,t) => record-type-lookup(obj-ty)^bind(fun(r): return(bigLamType(params, r)) end)
                         end
                       end
                       tc(obj)^bind(rec-loo-help)
