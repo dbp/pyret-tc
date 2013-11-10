@@ -325,7 +325,6 @@ data TCError:
   | errAppTypeNotWellFormed(inst, gen) with: tostring(self):
       "Type " + self.inst + " is not a well-formed instance of the type " + self.gen + "."
     end
-
 end
 
 fun msg(err :: TCError) -> String:
@@ -470,76 +469,6 @@ fun params-wrap(ps :: List<String>, t :: Type):
   else:
     bigLamType(ps, t)
   end
-end
-
-fun recequal(r1 :: RecordType, r2 :: RecordType) -> Bool:
-  doc: "Everything mentioned in a moreRecord must be in the normalRecord."
-  cases(RecordType) r1:
-    | normalRecord(fields1) =>
-      cases(RecordType) r2:
-        | normalRecord(fields2) => fields1 == fields2
-        | moreRecord(fields2) =>
-          for fold(base from true, field from fields2):
-            base and fields1.member(field)
-          end
-      end
-    | moreRecord(fields1) =>
-      cases(RecordType) r2:
-        | normalRecord(fields2) =>
-          for fold(base from true, field from fields1):
-            base and fields2.member(field)
-          end
-        | moreRecord(_) => true
-      end
-  end
-end
-
-fun tyequal(t1 :: Type, t2 :: Type) -> Bool:
-  doc: "Type equality, allowing for moreRecords containing unknown additional fields."
-  cases(Type) t1:
-    | nameType(name1) =>
-      cases(Type) t2:
-        | nameType(name2) => name1 == name2
-        | else => false
-      end
-    | anonType(rec1) =>
-      cases(Type) t2:
-        | anonType(rec2) =>
-          recequal(rec1, rec2)
-        | else => false
-      end
-    | arrowType(args1, ret1, rec1) =>
-      cases(Type) t2:
-        | arrowType(args2, ret2, rec2) =>
-          (args1 == args2) and (ret1 == ret2) and recequal(rec1, rec2)
-        | else => false
-      end
-    | methodType(self1, args1, ret1, rec1) =>
-      cases(Type) t2:
-        | methodType(self2, args2, ret2, rec2) =>
-          (self1 == self2) and (args1 == args2) and (ret1 == ret2) and recequal(rec1, rec2)
-        | else => false
-      end
-    | appType(name1, args1) =>
-      cases(Type) t2:
-        | appType(name2, args2) =>
-          (name1 == name2) and (args1 == args2)
-        | else => false
-      end
-    | dynType => t2 == dynType
-    | anyType => t2 == anyType
-  end
-where:
-  tyequal(nmty("A"), nmty("A")) is true
-  tyequal(nmty("A"), nmty("B")) is false
-  tyequal(anonType(normalRecord([])), anonType(moreRecord([pair("b", nmty("Number"))]))) is false
-  tyequal(anonType(normalRecord([])), anonType(normalRecord([]))) is true
-  tyequal(anonType(normalRecord([])), anonType(normalRecord([pair("b", nmty("Number"))]))) is false
-  tyequal(nmty("A"), arrowType([], nmty("A"), moreRecord([]))) is false
-  tyequal(arrowType([], nmty("A"), moreRecord([pair("b", nmty("Number"))])), arrowType([], nmty("A"), moreRecord([]))) is true
-  tyequal(arrowType([], nmty("A"), normalRecord([pair("b", nmty("Number"))])), arrowType([], nmty("A"), moreRecord([]))) is true
-  tyequal(arrowType([], nmty("A"), normalRecord([pair("b", nmty("Number"))])), arrowType([], nmty("A"), normalRecord([]))) is false
-  tyequal(arrowType([], nmty("A"), normalRecord([])), arrowType([], nmty("A"), moreRecord([pair("b", nmty("Number"))]))) is false
 end
 
 fun tycompat(t1 :: Type, t2 :: Type) -> Bool:
@@ -687,7 +616,9 @@ end
 
 fun tysolve(vars :: List<String>, _eqs :: List<Pair<Type, Type>>, tys :: List<Type>) -> TySolveRes:
   doc: "Solves for vars using eqs (by constraint generation/elimination) and uses those to substitute into tys.
-        If all are not solved for, returning none. This is how we instantiate type parameters through local inference."
+        If all are not solved for, returns someSolved, where the remaining ones have been replaced with dynType.
+        In the case of incompatibility (ie, not possible to solve), returns incompatible.
+        This is how we instantiate type parameters through local inference."
 
   fun congen(eqs :: List<Pair<Type, Type>>) -> List<Pair<String,Type>>:
     doc: "Output are pairs of v, ty, where v is a name in vars that should equal ty"
@@ -735,95 +666,92 @@ fun tysolve(vars :: List<String>, _eqs :: List<Pair<Type, Type>>, tys :: List<Ty
       | link(tp, r) =>
         cases(Pair) tp:
           | pair(t1, t2) =>
-            cases(Type) t1:
-              | nameType(n1) =>
-                if vars.member(n1):
-                  link(pair(n1, t2), congen(r))
-                else:
-                  if is-nameType(t2) and vars.member(t2.name):
+            if (t1 == dynType) or (t2 == dynType):
+              # dyn gives us no information about constraints.
+              congen(r)
+            else:
+              cases(Type) t1:
+                | nameType(n1) =>
+                  if vars.member(n1):
+                    link(pair(n1, t2), congen(r))
+                  else:
+                    if is-nameType(t2) and vars.member(t2.name):
                       link(pair(t2.name, t1), congen(r))
-                  else if is-dynType(t2) or (is-nameType(t2) and (n1 == t2.name)):
+                    else if is-dynType(t2) or (is-nameType(t2) and (n1 == t2.name)):
+                      congen(r)
+                    else if is-bigLamType(t2):
+                      solve-nested(t2.params, t2.type, t1)
+                    else:
+                      raise(nothing)
+                    end
+                  end
+                | anonType(rec1) =>
+                  (cases(Type) t2:
+                      | anonType(rec2) =>
+                        recgen(rec1, rec2)
+                      | bigLamType(params, type) => solve-nested(params, type, t1)
+                      | else => raise(nothing)
+                    end) + congen(r)
+                | arrowType(args1, ret1, rec1) =>
+                  cases(Type) t2:
+                    | arrowType(args2, ret2, rec2) =>
+                      if args1.length() <> args2.length():
+                        raise(nothing)
+                      else:
+                        congen(link(pair(ret1, ret2), zip2(args1, args2))) +
+                        recgen(rec1, rec2) + congen(r)
+                      end
+                    | bigLamType(params, type) => solve-nested(params, type, t1)
+                    | else =>
+                      if is-nameType(t2) and vars.member(t2.name):
+                        link(pair(t2.name, t1), congen(r))
+                      else:
+                        raise(nothing)
+                      end
+                  end
+                | methodType(self1, args1, ret1, rec1) =>
+                  cases(Type) t2:
+                    | methodType(self2, args2, ret2, rec2) =>
+                      if args1.length() <> args2.length():
+                        raise(nothing)
+                      else:
+                        congen(link(pair(self1, self2), link(pair(ret1, ret2), zip2(args1, args2)))) +
+                        recgen(rec1, rec2) + congen(r)
+                      end
+                    | bigLamType(params, type) => solve-nested(params, type, t1)
+                    | else =>
+                      if is-nameType(t2) and vars.member(t2.name):
+                        link(pair(t2.name, t1), congen(r))
+                      else:
+                        raise(nothing)
+                      end
+                  end
+                | appType(name1, args1) =>
+                  cases(Type) t2:
+                    | appType(name2, args2) =>
+                      if (args1.length() <> args2.length()) or (name1 <> name2):
+                        raise(nothing)
+                      else:
+                        congen(zip2(args1, args2)) + congen(r)
+                      end
+                    | bigLamType(params, type) => solve-nested(params, type, t1)
+                    | else =>
+                      if is-nameType(t2) and vars.member(t2.name):
+                        link(pair(t2.name, t1), congen(r))
+                      else:
+                        raise(nothing)
+                      end
+                  end
+                | bigLamType(params, type) => solve-nested(params, type, t2)
+                | anyType =>
+                  if t2 == anyType:
                     congen(r)
-                  else if is-bigLamType(t2):
-                    solve-nested(t2.params, t2.type, t1)
+                  else if is-nameType(t2) and vars.member(t2.name):
+                    link(pair(t2.name, t1), congen(r))
                   else:
                     raise(nothing)
                   end
-                end
-              | anonType(rec1) =>
-                (cases(Type) t2:
-                    | anonType(rec2) =>
-                      recgen(rec1, rec2)
-                    | bigLamType(params, type) => solve-nested(params, type, t1)
-                    | else => raise(nothing)
-                  end) + congen(r)
-              | arrowType(args1, ret1, rec1) =>
-                cases(Type) t2:
-                  | arrowType(args2, ret2, rec2) =>
-                    if args1.length() <> args2.length():
-                      raise(nothing)
-                    else:
-                      congen(link(pair(ret1, ret2), zip2(args1, args2))) +
-                      recgen(rec1, rec2) + congen(r)
-                    end
-                  | bigLamType(params, type) => solve-nested(params, type, t1)
-                  | else =>
-                    if is-nameType(t2) and vars.member(t2.name):
-                      link(pair(t2.name, t1), congen(r))
-                    else:
-                      raise(nothing)
-                    end
-                end
-              | methodType(self1, args1, ret1, rec1) =>
-                cases(Type) t2:
-                  | methodType(self2, args2, ret2, rec2) =>
-                    if args1.length() <> args2.length():
-                      raise(nothing)
-                    else:
-                      congen(link(pair(self1, self2), link(pair(ret1, ret2), zip2(args1, args2)))) +
-                      recgen(rec1, rec2) + congen(r)
-                    end
-                  | bigLamType(params, type) => solve-nested(params, type, t1)
-                  | else =>
-                    if is-nameType(t2) and vars.member(t2.name):
-                      link(pair(t2.name, t1), congen(r))
-                    else:
-                      raise(nothing)
-                    end
-                end
-              | appType(name1, args1) =>
-                cases(Type) t2:
-                  | appType(name2, args2) =>
-                    if (args1.length() <> args2.length()) or (name1 <> name2):
-                      raise(nothing)
-                    else:
-                      congen(zip2(args1, args2)) + congen(r)
-                    end
-                  | bigLamType(params, type) => solve-nested(params, type, t1)
-                  | else =>
-                    if is-nameType(t2) and vars.member(t2.name):
-                      link(pair(t2.name, t1), congen(r))
-                    else:
-                      raise(nothing)
-                    end
-                end
-              | bigLamType(params, type) => solve-nested(params, type, t2)
-              | dynType =>
-                if t2 == dynType:
-                  congen(r)
-                else if is-nameType(t2) and vars.member(t2.name):
-                  link(pair(t2.name, t1), congen(r))
-                else:
-                  raise(nothing)
-                end
-              | anyType =>
-                if t2 == anyType:
-                 congen(r)
-                else if is-nameType(t2) and vars.member(t2.name):
-                  link(pair(t2.name, t1), congen(r))
-                else:
-                  raise(nothing)
-                end
+              end
             end
         end
     end
@@ -1078,6 +1006,7 @@ fun get-variant-bindings(tname :: String, tparams :: List<String>, variant :: A.
   fun get-member-type(m): get-type(m.bind.ann) end
   cases(A.Variant) variant:
       # NOTE(dbp 2013-10-30): Should type check constructor here, get methods/fields.
+      # Without that, we can't typecheck methods of user defined datatypes.
     | s_datatype_variant(l, vname, members, constr) =>
       sequence(members.map(get-member-type))^bind(fun(memtys):
           return([pair(vname, params-wrap(tparams, arrowType(memtys, bigty, moreRecord([])))),
@@ -1778,6 +1707,86 @@ where:
 
 end
 
+
+################################################################################
+# Individual cases of type checker.                                            #
+################################################################################
+
+fun tc-let(l :: Loc, name :: A.Bind, val :: A.Expr) -> TCST<Type>:
+  # NOTE(dbp 2013-10-21): Ugly hack. We want to find
+  # desugared funs, so we look for let bindings. Our no-shadowing
+  # rule actually makes this easier, because since the iifs are
+  # all top level, if we find a binding anywhere that has that
+  # name, it must be the function.
+  get-type(name.ann)^bind(fun(bindty):
+      get-iifs()^bind(fun(iifs):
+          cases(option.Option) map-get(iifs, name.id):
+            | none =>
+              tc(val)^bind(fun(ty):
+                  subtype(l, ty, bindty)^bind(fun(st):
+                      if not st:
+                        add-error(l, msg(errAssignWrongType(name.id, fmty(bindty), fmty(ty))))^seq(
+                          return(dynType))
+                      else:
+                        return(ty)
+                      end
+                    end)
+                end)
+            | some(fty) =>
+              # NOTE(dbp 2013-10-21): we want to type check the function
+              # bound with our inferred type, unless they provided their
+              # own type. In the case of a type error when inference was
+              # involved we want to alter the error messages.
+              cases(A.Expr) val:
+                | s_lam(l1, ps, args, ann, doc, body, ck) =>
+                  # NOTE(dbp 2013-10-21): Gah, mutation. This code should
+                  # be refactored.
+                  var inferred = false
+                  bind-params(ps,
+                    sequence(for map2(b from args, inf from fty.args):
+                        if A.is-a_blank(b.ann):
+                          when inf <> dynType:
+                            inferred := true
+                          end
+                          return(inf)
+                        else:
+                          get-type(b.ann)
+                        end
+                      end)^bind(fun(arg-tys):
+                        add-bindings(for map2(b from args, t from arg-tys):
+                            pair(b.id, t)
+                          end,
+                          tc(body)^bind(fun(body-ty):
+                              (if A.is-a_blank(ann): return(fty.ret) else: get-type(ann) end)^bind(fun(ret-ty):
+                                  subtype(l, body-ty, ret-ty)^bind(fun(st):
+                                      if st:
+                                        return(params-wrap(ps, arrowType(arg-tys, ret-ty, moreRecord([]))))
+                                      else:
+                                        add-error(l,
+                                          if inferred:
+                                            msg(errFunctionInferredIncompatibleReturn(fmty(body-ty), fmty(ret-ty)))
+                                          else:
+                                            msg(errFunctionAnnIncompatibleReturn(fmty(body-ty), fmty(ret-ty)))
+                                          end)^seq(return(dynType))
+                                      end
+                                    end)
+                                end)
+                            end)
+                          )
+                      end)
+                    )
+                | else =>
+                  # NOTE(dbp 2013-10-21): This is a bizarre case. It means
+                  # we no longer understand the desugaring, so we really
+                  # should abort and figure our stuff out.
+                  raise("tc error: encountered a let binding that should have been a function, but wasn't (at loc " +
+                    torepr(l) + ")")
+              end
+          end
+        end)
+    end)
+end
+
 fun tc-app(l :: Loc, fn :: A.Expr, args :: List<A.Expr>) -> TCST<Type>:
   tc(fn)^bind(fun(fn-ty):
       cases(Type) fn-ty:
@@ -1848,7 +1857,94 @@ fun tc-if(l, branches, elsebranch) -> TCST<Type>:
       end))
 end
 
-fun tc-cases(l :: Loc, _type :: A.Ann, val :: A.Expr, branches :: List<A.CasesBranch>, _branches-ty :: Type) -> TCST<Type>:
+fun tc-bracket(l :: Loc, obj :: A.Expr, field :: A.Expr) -> TCST<Type>:
+  # NOTE(dbp 2013-11-03): We aren't actually checking methods, just applying them.
+  fun method-apply(ty):
+    cases(Type) ty:
+      | methodType(self, args, ret, rec) =>
+        arrowType(args, ret, rec)
+      | else => ty
+    end
+  end
+  cases(A.Expr) field:
+    | s_str(l1, s) =>
+      fun record-lookup(record):
+        cases(RecordType) record:
+          | normalRecord(fields) =>
+            cases(Option) map-get(fields, s):
+              | none => add-error(l, msg(errFieldNotFound(s)))^seq(return(dynType))
+              | some(ty) => return(method-apply(ty))
+            end
+          | moreRecord(fields) =>
+            cases(Option) map-get(fields, s):
+              | none => return(dynType)
+              | some(ty) => return(method-apply(ty))
+            end
+        end
+      end
+      var loop-point = nothing
+      fun record-type-lookup(type):
+        get-type-env()^bind(fun(type-env):
+            cases(Option) map-get(type-env, type):
+              | none => add-error(l, msg(errTypeNotDefined(fmty(type))))^seq(return(dynType))
+              | some(recordbind) =>
+                cases(Type) recordbind.type:
+                  | anonType(record) => record-lookup(record)
+                  | anyType => return(dynType)
+                  | dynType => return(dynType)
+                  | appType(_,_,_) => return(dynType)
+                    # NOTE(dbp 2013-11-05): Not doing cycle detection in type env. Could go into an infinite loop.
+                  | nameType(_) =>
+                    if (not Nothing(loop-point)) and identical(loop-point, recordbind.type):
+                      # don't go into an infinite loop.
+                      return(dynType)
+                    else:
+                      loop-point := recordbind.type
+                      record-type-lookup(recordbind.type)
+                    end
+                end
+            end
+          end)
+      end
+      fun rec-loo-help(obj-ty):
+        cases(Type) obj-ty:
+          | dynType => return(dynType)
+          | anyType => return(dynType)
+          | appType(name,args) =>
+            # NOTE(dbp 2013-11-09): Look up general type in type env.
+            get-type-env()^bind(fun(type-env):
+                cases(Option) map-get(type-env, nmty(name)):
+                  | none => add-error(l, msg(errTypeNotDefined(fmty(nmty(name)))))^seq(return(dynType))
+                  | some(typebind) =>
+                    cases(Type) typebind.type:
+                      | bigLamType(params, ptype) =>
+                        record-type-lookup(typebind.type)^bind(fun(pty):
+                            cases(TySolveRes) tysolve(params, [pair(ptype, obj-ty)], [pty]):
+                              | allSolved(vs) => return(vs.first)
+                              | someSolved(vs) => return(vs.first)
+                              | incompatible =>
+                                add-error(l, msg(errAppTypeNotWellFormed(fmty(obj-ty), fmty(typebind.type))))
+                                  ^seq(return(dynType))
+                            end
+                          end)
+                      | else => raise("tc: found an appType that didn't map to a bigLamType in the type env. This violates a constraint, aborting.")
+                    end
+                end
+              end)
+          | anonType(record) => record-lookup(record)
+          | nameType(_) => record-type-lookup(obj-ty)
+          | bigLamType(params,t) => record-type-lookup(obj-ty)^bind(fun(r): return(bigLamType(params, r)) end)
+        end
+      end
+      tc(obj)^bind(rec-loo-help)
+    | else =>
+      # TODO(dbp 2013-10-21): Actually type check field to see if
+      # it is a String or Dyn
+      return(dynType)
+  end
+end
+
+fun tc-cases(l :: Loc, _type :: A.Ann, val :: A.Expr, branches :: List<A.CasesBranch>) -> TCST<Type>:
   fun branch-check(params :: List<String>, base :: Type, variant :: Type, branch :: A.CasesBranch) -> TCST<Type>:
     if is-incompatible(tysolve(params, [pair(base, variant)], [])):
       add-error(branch.l,
@@ -1955,93 +2051,25 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                       return(if tys == []: nmty("Nothing") else: tys.last() end)
                     end)
                 | s_user_block(l, block) => tc(block)
-                | s_var(l, name, val) => return(dynType)
-                | s_let(l, name, val) =>
-                  # NOTE(dbp 2013-10-21): Ugly hack. We want to find
-                  # desugared funs, so we look for let bindings. Our no-shadowing
-                  # rule actually makes this easier, because since the iifs are
-                  # all top level, if we find a binding anywhere that has that
-                  # name, it must be the function.
-                  get-type(name.ann)^bind(fun(bindty):
-                      get-iifs()^bind(fun(iifs):
-                          cases(option.Option) map-get(iifs, name.id):
-                            | none =>
-                              tc(val)^bind(fun(ty):
-                                  subtype(l, ty, bindty)^bind(fun(st):
-                                      if not st:
-                                        add-error(l, msg(errAssignWrongType(name.id, fmty(bindty), fmty(ty))))^seq(
-                                          return(dynType))
-                                      else:
-                                        return(ty)
-                                      end
-                                    end)
-                                end)
-                            | some(fty) =>
-                              # NOTE(dbp 2013-10-21): we want to type check the function
-                              # bound with our inferred type, unless they provided their
-                              # own type. In the case of a type error when inference was
-                              # involved we want to alter the error messages.
-                              cases(A.Expr) val:
-                                | s_lam(l1, ps, args, ann, doc, body, ck) =>
-                                  # NOTE(dbp 2013-10-21): Gah, mutation. This code should
-                                  # be refactored.
-                                  var inferred = false
-                                  bind-params(ps,
-                                    sequence(for map2(b from args, inf from fty.args):
-                                        if A.is-a_blank(b.ann):
-                                          when inf <> dynType:
-                                            inferred := true
-                                          end
-                                          return(inf)
-                                        else:
-                                          get-type(b.ann)
-                                        end
-                                      end)^bind(fun(arg-tys):
-                                        add-bindings(for map2(b from args, t from arg-tys):
-                                            pair(b.id, t)
-                                          end,
-                                          tc(body)^bind(fun(body-ty):
-                                              (if A.is-a_blank(ann): return(fty.ret) else: get-type(ann) end)^bind(fun(ret-ty):
-                                                  subtype(l, body-ty, ret-ty)^bind(fun(st):
-                                                      if st:
-                                                        return(params-wrap(ps, arrowType(arg-tys, ret-ty, moreRecord([]))))
-                                                      else:
-                                                        add-error(l,
-                                                          if inferred:
-                                                            msg(errFunctionInferredIncompatibleReturn(fmty(body-ty), fmty(ret-ty)))
-                                                          else:
-                                                            msg(errFunctionAnnIncompatibleReturn(fmty(body-ty), fmty(ret-ty)))
-                                                          end)^seq(return(dynType))
-                                                      end
-                                                    end)
-                                                end)
-                                            end)
-                                          )
-                                      end)
-                                    )
-                                | else =>
-                                  # NOTE(dbp 2013-10-21): This is a bizarre case. It means
-                                  # we no longer understand the desugaring, so we really
-                                  # should abort and figure our stuff out.
-                                  raise("Type Checker error: encountered a let binding that
-                                    should have been a function, but wasn't (at loc " +
-                                    torepr(l) + ")")
-                              end
-                          end
-                        end)
-                    end)
+                  # NOTE(dbp 2013-11-10): As of now, the type system does not know about mutation,
+                  # so vars look like lets.
+                | s_var(l, name, val) => tc-let(l, name, val)
+                | s_let(l, name, val) => tc-let(l, name, val)
                 | s_assign(l, id, val) => return(dynType)
                 | s_if_else(l, branches, elsebranch) => tc-if(l, branches, elsebranch)
                 | s_lam(l, ps, args, ann, doc, body, ck) =>
                   # NOTE(dbp 2013-11-03): Check for type shadowing.
                   bind-params(ps,
                     get-type(ann)^bind(fun(ret-ty):
-                        sequence(args.map(fun(b): get-type(b.ann)^bind(fun(t): return(pair(b.id, t)) end) end))^bind(fun(new-binds):
+                        sequence(args.map(fun(b): get-type(b.ann)^bind(fun(t):
+                              return(pair(b.id, t)) end)
+                            end))^bind(fun(new-binds):
                             add-bindings(new-binds,
                               tc(body)^bind(fun(body-ty):
                                   subtype(l, body-ty, ret-ty)^bind(fun(st):
                                       if st:
-                                        return(params-wrap(ps, arrowType(new-binds.map(fun(bnd): bnd.b end), ret-ty, moreRecord([]))))
+                                        return(params-wrap(ps, arrowType(new-binds.map(fun(bnd): bnd.b end),
+                                              ret-ty, moreRecord([]))))
                                       else:
                                         add-error(l,
                                           msg(errFunctionAnnIncompatibleReturn(fmty(body-ty), fmty(ret-ty))))^seq(
@@ -2053,7 +2081,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                           end)
                       end)
                     )
-                  | s_method(l, args, ann, doc, body, ck) => return(dynType)
+                | s_method(l, args, ann, doc, body, ck) => return(dynType)
                 | s_extend(l, super, fields) =>
                   tc(super)^bind(fun(base):
                       for foldm(ty from base, fld from fields):
@@ -2094,90 +2122,14 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                 | s_bool(l, bool) => return(nmty("Bool"))
                 | s_str(l, str) => return(nmty("String"))
                 | s_get_bang(l, obj, str) => return(dynType)
-                | s_bracket(l, obj, field) =>
-                  # NOTE(dbp 2013-11-03): We aren't actually checking methods, just applying them.
-                  fun method-apply(ty):
-                    cases(Type) ty:
-                      | methodType(self, args, ret, rec) =>
-                        arrowType(args, ret, rec)
-                      | else => ty
-                    end
-                  end
-                  cases(A.Expr) field:
-                    | s_str(l1, s) =>
-                      fun record-lookup(record):
-                        cases(RecordType) record:
-                          | normalRecord(fields) =>
-                            cases(Option) map-get(fields, s):
-                              | none => add-error(l, msg(errFieldNotFound(s)))^seq(return(dynType))
-                              | some(ty) => return(method-apply(ty))
-                            end
-                          | moreRecord(fields) =>
-                            cases(Option) map-get(fields, s):
-                              | none => return(dynType)
-                              | some(ty) => return(method-apply(ty))
-                            end
-                        end
-                      end
-                      fun record-type-lookup(type):
-                        get-type-env()^bind(fun(type-env):
-                            cases(Option) map-get(type-env, type):
-                              | none => add-error(l, msg(errTypeNotDefined(fmty(type))))^seq(return(dynType))
-                              | some(recordbind) =>
-                                cases(Type) recordbind.type:
-                                  | anonType(record) => record-lookup(record)
-                                  | anyType => return(dynType)
-                                  | dynType => return(dynType)
-                                  | appType(_,_,_) => return(dynType)
-                                    # NOTE(dbp 2013-11-05): Not doing cycle detection in type env. Could go into an infinite loop.
-                                  | nameType(_) => record-type-lookup(recordbind.type)
-                                end
-                            end
-                          end)
-                      end
-                      fun rec-loo-help(obj-ty):
-                        cases(Type) obj-ty:
-                          | dynType => return(dynType)
-                          | anyType => return(dynType)
-                          | appType(name,args) =>
-                            # NOTE(dbp 2013-11-09): Look up general type in type env.
-                            get-type-env()^bind(fun(type-env):
-                                cases(Option) map-get(type-env, nmty(name)):
-                                  | none => add-error(l, msg(errTypeNotDefined(fmty(nmty(name)))))^seq(return(dynType))
-                                  | some(typebind) =>
-                                    cases(Type) typebind.type:
-                                      | bigLamType(params, ptype) =>
-                                        record-type-lookup(typebind.type)^bind(fun(pty):
-                                            cases(TySolveRes) tysolve(params, [pair(ptype, obj-ty)], [pty]):
-                                              | allSolved(vs) => return(vs.first)
-                                              | someSolved(vs) => return(vs.first)
-                                              | incompatible =>
-                                                add-error(l, msg(errAppTypeNotWellFormed(fmty(obj-ty), fmty(typebind.type))))
-                                                  ^seq(return(dynType))
-                                            end
-                                          end)
-                                      | else => raise("tc: found an appType that didn't map to a bigLamType in the type env. This violates a constraint, aborting.")
-                                    end
-                                end
-                              end)
-                          | anonType(record) => record-lookup(record)
-                          | nameType(_) => record-type-lookup(obj-ty)
-                          | bigLamType(params,t) => record-type-lookup(obj-ty)^bind(fun(r): return(bigLamType(params, r)) end)
-                        end
-                      end
-                      tc(obj)^bind(rec-loo-help)
-                    | else =>
-                      # NOTE(dbp 2013-10-21): Actually type check field to see if
-                      # it is a String or Dyn
-                      return(dynType)
-                  end
+                | s_bracket(l, obj, field) => tc-bracket(l, obj, field)
                 | s_colon_bracket(l, obj, field) => return(dynType)
                 | s_datatype(l, name, params, variants, check) =>
                   # NOTE(dbp 2013-10-30): Should statements have type nothing?
                   return(nmty("Nothing"))
-                | s_cases(l, type, val, branches) => tc-cases(l, type, val, branches, anyType)
+                | s_cases(l, type, val, branches) => tc-cases(l, type, val, branches)
                 | s_cases_else(l, type, val, branches, _else) =>
-                  tc(_else)^bind(fun(elsety): tc-cases(l, type, val, branches, elsety) end)
+                  tc-cases(l, type, val, branches + [A.s_cases_branch(_else.l, "%else", [], _else)])
                   # NOTE(dbp 2013-11-05): Since we type check
                   # pre-desugar code inside 'is' tests for inference, we need
                   # any ast nodes that could appear there (in theory, any surface syntax...)
