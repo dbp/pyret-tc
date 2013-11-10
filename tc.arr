@@ -298,14 +298,14 @@ data TCError:
   | errCasesValueBadType(expected, given) with: tostring(self):
       "The value in cases expression should have type " + self.expected + ", but has incompatible type " + self.given + "."
     end
-  | errCasesBranchInvalidVariant(type, name) with: tostring(self):
-      "The branch " + self.name + " in the cases expression is not a valid variant of the data type " + self.type + "."
+  | errCasesBranchInvalidVariant(type, name, branchty) with: tostring(self):
+      "The branch " + self.name + " in the cases expression is not a valid variant of the data type " + self.type + " (it has type " + self.branchty + ")."
     end
   | errCasesPatternNumberFields(name, expected, given) with: tostring(self):
       "The variant pattern for cases branch " + self.name + " should have " + tostring(self.expected) + " fields, not " + tostring(self.given)  + "."
     end
-  | errCasesBranchType(type1, type2, name) with: tostring(self):
-      "All branches of a cases expression must evaluate to the same type. Found branches with type " + self.type1 +", which is incompatible with the type of branch " + self.name + ", which has type " + self.type2 + "."
+  | errCasesBranchType(types) with: tostring(self):
+      "All branches of a cases expression must evaluate to the same type. Found branches with incompatible types: " + self.types.join-str(", ") +"."
     end
   | errTypeNotDefined(type) with: tostring(self):
       "The " + self.type + " type is not defined. Did you forget to import, or forget to add the type parameter?"
@@ -629,6 +629,48 @@ where:
     is anonType(moreRecord([pair("foo", my-type)]))
 end
 
+fun appears(v :: String, t :: Type) -> Bool:
+  fun rec-appears(_v :: String, r :: RecordType) -> Bool:
+    list.any(fun(x): x end, r.fields.map(_.b).map(appears(_v,_)))
+  end
+  cases(Type) t:
+    | nameType(name) => name == v
+    | anonType(rec) => rec-appears(v, rec)
+    | arrowType(args, ret, rec) =>
+      list.any(fun(x): x end, args.map(appears(v,_))) or appears(v, ret) or rec-appears(v, rec)
+    | methodType(self, args, ret, rec) =>
+      list.any(fun(x): x end, args.map(appears(v,_))) or  appears(v, self) or appears(v, ret) or rec-appears(v, rec)
+    | appType(name, args) =>
+      list.any(fun(x): x end, args.map(appears(v,_)))
+    | dynType => false
+    | anyType => false
+  end
+end
+
+fun replace(v :: String, nt :: Type, t :: Type) -> Type:
+  doc: "replace any occurrence of nameType(n) with nt in t"
+  fun rec-replace(_v :: String, _nt :: Type, r :: RecordType) -> RecordType:
+    cases(RecordType) r:
+      | normalRecord(fields) =>
+        normalRecord(fields.map(fun(p): pair(p.a, replace(_v,_nt,p.b)) end))
+      | moreRecord(fields) =>
+        moreRecord(fields.map(fun(p): pair(p.a, replace(_v,_nt,p.b)) end))
+    end
+  end
+  cases(Type) t:
+    | nameType(name) => if name == v: nt else: t end
+    | anonType(rec) => anonType(rec-replace(v, nt, rec))
+    | arrowType(args, ret, rec) =>
+      arrowType(args.map(replace(v,nt,_)), replace(v,nt,ret), rec-replace(v,nt, rec))
+    | methodType(self, args, ret, rec) =>
+      methodType(replace(v,nt,self), args.map(replace(v,nt,_)), replace(v,nt,ret), rec-replace(v,nt, rec))
+    | appType(name, args) =>
+      appType(name, args.map(replace(v,nt,_)))
+    | dynType => false
+    | anyType => false
+  end
+end
+
 data TySolveRes:
   | allSolved(l :: List<Type>)
   | someSolved(l :: List<Type>)
@@ -692,7 +734,7 @@ fun tysolve(vars :: List<String>, _eqs :: List<Pair<Type, Type>>, tys :: List<Ty
                 else:
                   if is-nameType(t2) and vars.member(t2.name):
                       link(pair(t2.name, t1), congen(r))
-                  else if is-dynType(t2):
+                  else if is-dynType(t2) or (is-nameType(t2) and (n1 == t2.name)):
                     congen(r)
                   else if is-bigLamType(t2):
                     solve-nested(t2.params, t2.type, t1)
@@ -762,7 +804,7 @@ fun tysolve(vars :: List<String>, _eqs :: List<Pair<Type, Type>>, tys :: List<Ty
                 if t2 == dynType:
                   congen(r)
                 else if is-nameType(t2) and vars.member(t2.name):
-                  link(pair(t2, t1), congen(r))
+                  link(pair(t2.name, t1), congen(r))
                 else:
                   raise(nothing)
                 end
@@ -770,7 +812,7 @@ fun tysolve(vars :: List<String>, _eqs :: List<Pair<Type, Type>>, tys :: List<Ty
                 if t2 == anyType:
                  congen(r)
                 else if is-nameType(t2) and vars.member(t2.name):
-                  link(pair(t2, t1), congen(r))
+                  link(pair(t2.name, t1), congen(r))
                 else:
                   raise(nothing)
                 end
@@ -822,48 +864,6 @@ fun tysolve(vars :: List<String>, _eqs :: List<Pair<Type, Type>>, tys :: List<Ty
               raise("tysolve: invariant violated - left side should be var.")
             end
         end
-    end
-  end
-
-  fun appears(v :: String, t :: Type) -> Bool:
-    fun rec-appears(_v :: String, r :: RecordType) -> Bool:
-      list.any(fun(x): x end, r.fields.map(_.b).map(appears(_v,_)))
-    end
-    cases(Type) t:
-      | nameType(name) => name == v
-      | anonType(rec) => rec-appears(v, rec)
-      | arrowType(args, ret, rec) =>
-        list.any(fun(x): x end, args.map(appears(v,_))) or appears(v, ret) or rec-appears(v, rec)
-      | methodType(self, args, ret, rec) =>
-        list.any(fun(x): x end, args.map(appears(v,_))) or  appears(v, self) or appears(v, ret) or rec-appears(v, rec)
-      | appType(name, args) =>
-        list.any(fun(x): x end, args.map(appears(v,_)))
-      | dynType => false
-      | anyType => false
-    end
-  end
-
-  fun replace(v :: String, nt :: Type, t :: Type) -> Type:
-    doc: "replace any occurrence of nameType(n) with nt in t"
-    fun rec-replace(_v :: String, _nt :: Type, r :: RecordType) -> RecordType:
-      cases(RecordType) r:
-        | normalRecord(fields) =>
-          normalRecord(fields.map(fun(p): pair(p.a, replace(_v,_nt,p.b)) end))
-        | moreRecord(fields) =>
-          moreRecord(fields.map(fun(p): pair(p.a, replace(_v,_nt,p.b)) end))
-      end
-    end
-    cases(Type) t:
-      | nameType(name) => if name == v: nt else: t end
-      | anonType(rec) => anonType(rec-replace(v, nt, rec))
-      | arrowType(args, ret, rec) =>
-        arrowType(args.map(replace(v,nt,_)), replace(v,nt,ret), rec-replace(v,nt, rec))
-      | methodType(self, args, ret, rec) =>
-        methodType(replace(v,nt,self), args.map(replace(v,nt,_)), replace(v,nt,ret), rec-replace(v,nt, rec))
-      | appType(name, args) =>
-        appType(name, args.map(replace(v,nt,_)))
-      | dynType => false
-      | anyType => false
     end
   end
 
@@ -956,8 +956,41 @@ where:
   tysolve(["T"], [pair(nmty("T"), nmty("Bool")),
       pair(appty("Foo", ["String"]), bigLamType(["T"], appty("Foo", [nmty("T")])))], [nmty("T")])
   is allSolved([nmty("Bool")])
+
+  tysolve([], [pair(nmty("Bool"), nmty("Bool"))], []) is allSolved([])
+  tysolve(["T"], [pair(nmty("Bool"), nmty("Bool"))], [nmty("T")]) is someSolved([dynType])
 end
 
+
+data RenameRes:
+  | renameRes(params :: List<String>, types :: List<Type>)
+end
+fun rename-params(_params, types-appear, types-rename):
+  doc: "renames any params that appear in types-appear in types-rename"
+  # this is a hack - we want a pool of free variables... Assuming enough of these
+  # will be free.
+  fvs = builtins.string-to-list("ABCDEFGHIJKLMNOPQRSTUVWXYZ").filter(
+    fun(v): not list.any(fun(x): x end, types-appear.map(appears(v,_))) end)
+
+  fun h(params, fv-index, new-params, new-types):
+    cases(List) params:
+      | empty => renameRes(new-params, new-types)
+      | link(f, r) =>
+        if list.any(fun(x): x end, types-appear.map(appears(f, _))):
+          np = fvs.get(fv-index)
+          h(r, fv-index + 1, new-params + [np], new-types.map(replace(f, nmty(np), _)))
+        else:
+          h(r, fv-index, new-params + [f], new-types)
+        end
+    end
+  end
+
+  h(_params, 0, [], types-rename)
+where:
+  rename-params(["T"], [nmty("T")], [nmty("T")]) is renameRes(["A"], [nmty("A")])
+  rename-params(["T"], [nmty("U")], [nmty("T")]) is renameRes(["T"], [nmty("T")])
+  rename-params(["T", "U", "V"], [nmty("U")], [nmty("T"), nmty("U")]) is renameRes(["T", "A", "V"], [nmty("T"), nmty("A")])
+end
 
 ################################################################################
 # Binding extraction, letrec behavior, datatype bindings.                      #
@@ -1710,9 +1743,12 @@ fun tc-branches(bs :: List<TCST<Type>>) -> TCST<TCBranchRes>:
       end
       ftys = h(_btys.sort-by(blc, ble), [])
       fl = ftys.length()
-      if fl == 0:
+      if _btys.length() == 0:
         # this means there are no branches, so there is no type.
         return(branchCompatible(nmty("Nothing")))
+      else if fl == 0:
+        # all were dynType
+        return(branchCompatible(dynType))
       else if fl == 1:
         return(branchCompatible(ftys.first))
       else:
@@ -1804,20 +1840,14 @@ fun tc-if(l, branches, elsebranch) -> TCST<Type>:
 end
 
 fun tc-cases(l :: Loc, _type :: A.Ann, val :: A.Expr, branches :: List<A.CasesBranch>, _branches-ty :: Type) -> TCST<Type>:
-  fun tc-branch(branch, branches-ty) -> TCST<Type>:
-    tc(branch.body)^bind(fun(branchty):
-        if branches-ty == anyType: # in first branch
-          return(branchty)
-        else:
-          if tycompat(branchty, branches-ty):
-            return(branchty)
-          else:
-            add-error(branch.l,
-              msg(errCasesBranchType(fmty(branches-ty), fmty(branchty), branch.name))
-              )^seq(return(dynType))
-          end
-        end
-      end)
+  fun branch-check(params :: List<String>, base :: Type, variant :: Type, branch :: A.CasesBranch) -> TCST<Type>:
+    if is-incompatible(tysolve(params, [pair(base, variant)], [])):
+      add-error(branch.l,
+        msg(errCasesBranchInvalidVariant(fmty(base), branch.name, fmty(variant)))
+        )^seq(return(dynType))
+    else:
+      tc(branch.body)
+    end
   end
   get-type(_type)^bind(
     fun(type):
@@ -1830,105 +1860,70 @@ fun tc-cases(l :: Loc, _type :: A.Ann, val :: A.Expr, branches :: List<A.CasesBr
           else:
             get-env()^bind(
               fun(env):
-                for foldm(branches-ty from _branches-ty, branch from branches):
-                  # TODO(dbp 2013-10-30): Need to have a data-env, so we can
-                  # pick up non-bound constructors.
-                  cases(Option) map-get(env, branch.name):
-                    | none => add-error(branch.l,
-                        msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
-                        )^seq(return(dynType))
-                    | some(ty) =>
-                      cases(Type) ty:
-                        | arrowType(args, ret, rec) =>
-                          # NOTE(dbp 2013-10-30): No subtyping - cases type
-                          # must match constructors exactly (modulo records)
-                          if not tyequal(ret, type):
-                            add-error(branch.l,
-                              msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
-                              )^seq(return(dynType))
-                          else if args.length() <> branch.args.length():
-                            add-error(branch.l,
-                              msg(errCasesPatternNumberFields(branch.name, args.length(), branch.args.length()))
-                              )^seq(return(dynType))
-                          else:
-                            # NOTE(dbp 2013-10-30): We want to check that
-                            # branches have the same type.  This is slightly
-                            # tricky, so we'll opt for a temporary but dynless solution -
-                            # set it to the first branches type, and make
-                            # sure all the rest are equal.
-                            add-bindings(for map2(bnd from branch.args,
-                                  argty from args):
-                                pair(bnd.id, argty)
-                              end,
-                              tc-branch(branch, branches-ty))
-                          end
-                        | nameType(_) =>
-                          if not tyequal(ty, type):
-                            add-error(branch.l,
-                              msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
-                              )^seq(return(dynType))
-                          else:
-                            tc-branch(branch, branches-ty)
-                          end
-                        | appType(_,_) =>
-                          if not tyequal(ty, type):
-                            add-error(branch.l,
-                              msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
-                              )^seq(return(dynType))
-                          else:
-                            tc-branch(branch, branches-ty)
-                          end
-                        | bigLamType(params, ty1) =>
-                          cases(Type) ty1:
+                tc-branches(branches.map(fun(branch):
+                      cases(Option) map-get(env, branch.name):
+                        | none => add-error(branch.l,
+                            msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
+                            )^seq(return(dynType))
+                        | some(ty) =>
+                          cases(Type) ty:
                             | arrowType(args, ret, rec) =>
-                              cases(TySolveRes) tysolve(params, [pair(ret, type)], args):
-                                | allSolved(args-resolved) =>
-                                  add-bindings(for map2(bnd from branch.args,
-                                        argty from args-resolved):
-                                      pair(bnd.id, argty)
-                                    end,
-                                    tc-branch(branch, branches-ty))
-                                | someSolved(args-resolved) =>
-                                  add-bindings(for map2(bnd from branch.args,
-                                        argty from args-resolved):
-                                      pair(bnd.id, argty)
-                                    end,
-                                    tc-branch(branch, branches-ty))
-                                | incompatible =>
-                                  add-error(branch.l,
-                                    msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
-                                    )^seq(return(dynType))
+                              if args.length() <> branch.args.length():
+                                add-error(branch.l,
+                                  msg(errCasesPatternNumberFields(branch.name, args.length(), branch.args.length()))
+                                  )^seq(return(dynType))
+                              else:
+                                add-bindings(for map2(bnd from branch.args,
+                                      argty from args):
+                                    pair(bnd.id, argty)
+                                  end,
+                                  branch-check([], type, ret, branch))
                               end
-                            | nameType(_) =>
-                              cases(TySolveRes) tysolve(params, [pair(ty1, type)], params.map(nmty)):
-                                | incompatible =>
-                                  add-error(branch.l,
-                                    msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
-                                    )^seq(return(dynType))
+                            | nameType(_) => branch-check([], type, ty, branch)
+                            | appType(_,_) => branch-check([], type, ty, branch)
+                            | bigLamType(params, ty1) =>
+                              cases(Type) ty1:
+                                | arrowType(args, ret, rec) =>
+                                  # rename any params that appear in type. this needs to happen in ret and args.
+                                  cases(RenameRes) rename-params(params, [type], [arrowType(args, ret, moreRecord([]))]):
+                                    | renameRes(new-params, new-types) =>
+                                      new-arr = new-types.first
+                                      solved = tysolve(new-params, [pair(new-arr.ret, type)], new-arr.args)
+                                      cases(TySolveRes) solved:
+                                        | incompatible =>
+                                          add-error(branch.l,
+                                            msg(errCasesBranchInvalidVariant(fmty(type), branch.name, fmty(ty)))
+                                            )^seq(return(dynType))
+                                        | else =>
+                                          add-bindings(for map2(bnd from branch.args,
+                                                argty from solved.l):
+                                              pair(bnd.id, argty)
+                                            end,
+                                            tc(branch.body))
+                                      end
+                                  end
+                                | nameType(_) => branch-check(params, type, ty1, branch)
+                                | appType(_, _) => branch-check(params, type, ty1, branch)
                                 | else =>
-                                  tc-branch(branch, branches-ty)
-                              end
-                            | appType(_, _) =>
-                              cases(TySolveRes) tysolve(params, [pair(ty1, type)], params.map(nmty)):
-                                | incompatible =>
                                   add-error(branch.l,
-                                    msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
+                                    msg(errCasesBranchInvalidVariant(fmty(type), branch.name, fmty(ty)))
                                     )^seq(return(dynType))
-                                | else =>
-                                  tc-branch(branch, branches-ty)
                               end
                             | else =>
                               add-error(branch.l,
-                                msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
+                                msg(errCasesBranchInvalidVariant(fmty(type), branch.name, fmty(ty)))
                                 )^seq(return(dynType))
                           end
-                        | else =>
-                          add-error(branch.l,
-                            msg(errCasesBranchInvalidVariant(fmty(type), branch.name))
-                            )^seq(return(dynType))
                       end
-                  end
-                end
+                    end))^bind(fun(branchres):
+                    cases(TCBranchRes) branchres:
+                      | branchIncompatible(tys) =>
+                        add-error(l,
+                          msg(errCasesBranchType(tys.map(fmty)))
+                          )^seq(return(dynType))
+                      | branchCompatible(ty) => return(ty)
+                    end
+                  end)
               end)
           end
         end)
