@@ -322,6 +322,10 @@ data TCError:
   | errFunctionArgumentsIncompatible(fnty, arg-tys) with: tostring(self):
       "Function with type " + self.fnty + " not compatible with arguments " + self.arg-tys.join-str(", ") + "."
     end
+  | errAppTypeNotWellFormed(inst, gen) with: tostring(self):
+      "Type " + self.inst + " is not a well-formed instance of the type " + self.gen + "."
+    end
+
 end
 
 fun msg(err :: TCError) -> String:
@@ -532,12 +536,16 @@ where:
 end
 
 fun tycompat(t1 :: Type, t2 :: Type) -> Bool:
-  doc: "equality with Dyn"
+  doc: "equality with Dyn and bigLamType"
   cases(Type) t1:
     | dynType => true
+    | bigLamType(params, type) =>
+      not is-incompatible(tysolve(params, [pair(type, t2)], []))
     | else =>
       cases(Type) t2:
         | dynType => true
+        | bigLamType(params, type) =>
+          not is-incompatible(tysolve(params, [pair(type, t1)], []))
         | else => t1 == t2
       end
   end
@@ -830,7 +838,7 @@ fun tysolve(vars :: List<String>, _eqs :: List<Pair<Type, Type>>, tys :: List<Ty
 
   fun replace(v :: String, nt :: Type, t :: Type) -> Type:
     doc: "replace any occurrence of nameType(n) with nt in t"
-    fun rec-replace(_v :: String, _nt :: Type, r :: RecordType) -> Bool:
+    fun rec-replace(_v :: String, _nt :: Type, r :: RecordType) -> RecordType:
       cases(RecordType) r:
         | normalRecord(fields) =>
           normalRecord(fields.map(fun(p): pair(p.a, replace(_v,_nt,p.b)) end))
@@ -2055,10 +2063,10 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                             end
                         end
                       end
-                      fun record-type-lookup(name):
+                      fun record-type-lookup(type):
                         get-type-env()^bind(fun(type-env):
-                            cases(Option) map-get(type-env, name):
-                              | none => add-error(l, msg(errTypeNotDefined(fmty(name))))^seq(return(dynType))
+                            cases(Option) map-get(type-env, type):
+                              | none => add-error(l, msg(errTypeNotDefined(fmty(type))))^seq(return(dynType))
                               | some(recordbind) =>
                                 cases(Type) recordbind.type:
                                   | anonType(record) => record-lookup(record)
@@ -2075,7 +2083,27 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                         cases(Type) obj-ty:
                           | dynType => return(dynType)
                           | anyType => return(dynType)
-                          | appType(_,_) => return(dynType)
+                          | appType(name,args) =>
+                            # NOTE(dbp 2013-11-09): Look up general type in type env.
+                            get-type-env()^bind(fun(type-env):
+                                cases(Option) map-get(type-env, nmty(name)):
+                                  | none => add-error(l, msg(errTypeNotDefined(fmty(nmty(name)))))^seq(return(dynType))
+                                  | some(typebind) =>
+                                    cases(Type) typebind.type:
+                                      | bigLamType(params, ptype) =>
+                                        record-type-lookup(typebind.type)^bind(fun(pty):
+                                            cases(TySolveRes) tysolve(params, [pair(ptype, obj-ty)], [pty]):
+                                              | allSolved(vs) => return(vs.first)
+                                              | someSolved(vs) => return(vs.first)
+                                              | incompatible =>
+                                                add-error(l, msg(errAppTypeNotWellFormed(fmty(obj-ty), fmty(typebind.type))))
+                                                  ^seq(return(dynType))
+                                            end
+                                          end)
+                                      | else => raise("tc: found an appType that didn't map to a bigLamType in the type env. This violates a constraint, aborting.")
+                                    end
+                                end
+                              end)
                           | anonType(record) => record-lookup(record)
                           | nameType(_) => record-type-lookup(obj-ty)
                           | bigLamType(params,t) => record-type-lookup(obj-ty)^bind(fun(r): return(bigLamType(params, r)) end)
