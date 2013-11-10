@@ -313,8 +313,8 @@ data TCError:
   | errIfTestNotBool(ty) with: tostring(self):
       "The test of the if expression has type " + self.ty + ", which is not a Bool."
     end
-  | errIfBranchType(type1, type2) with: tostring(self):
-      "All branches of an if expression must evaluate to the same type. Found branches with type " + self.type1 + " which is incompatible with this branch, which has type " + self.type2 + "."
+  | errIfBranchType(types) with: tostring(self):
+      "All branches of an if expression must evaluate to the same type. Found branches with incompatible types: " + self.types.join-str(", ") + "."
     end
   | errAnnDotNotSupported(obj, field) with: tostring(self):
       "Dotted annotations are currently not supported, so we are treating " + self.obj + "." + self.field + " as the Dynamic type."
@@ -1626,7 +1626,7 @@ fun tc-main(p, s):
     pair("fold", dynType),
     pair("map", bigLamType(["U", "T"], arrowType([arrowType([nmty("T")], nmty("U"), moreRecord([])), appty("List", ["T"])], appty("List", ["U"]), moreRecord([])))),
     pair("map2", dynType),
-    pair("raise", arrowType([anyType], anyType, moreRecord([]))),
+    pair("raise", arrowType([anyType], dynType, moreRecord([]))),
     pair("identical", arrowType([anyType, anyType], nmty("Bool"), moreRecord([]))),
     pair("Racket", dynType),
     pair("List", arrowType([anyType], nmty("Bool"), moreRecord([]))),
@@ -1684,6 +1684,55 @@ fun tc-member(ast :: A.Member) -> TCST<Option<Pair<String,Type>>>:
   end
 end
 
+data TCBranchRes:
+  | branchCompatible(type :: Type)
+  | branchIncompatible(types :: List<Type>)
+end
+
+fun tc-branches(bs :: List<TCST<Type>>) -> TCST<TCBranchRes>:
+  sequence(bs)^bind(fun(_btys):
+      fun h(btys, final-tys):
+        cases(List) btys:
+          | empty => final-tys
+          | link(f, r) =>
+            if (f == dynType) or (final-tys.member(f)) or list.any(fun(x): x end, final-tys.map(tycompat(_, f))):
+              h(r, final-tys)
+            else:
+              h(r, link(f, final-tys))
+            end
+        end
+      end
+      fun blc(t1, t2) -> Bool:
+        (not is-bigLamType(t1)) and is-bigLamType(t2)
+      end
+      fun ble(t1, t2) -> Bool:
+        (is-bigLamType(t1) and is-bigLamType(t2)) or ((not is-bigLamType(t1)) and (not is-bigLamType(t2)))
+      end
+      ftys = h(_btys.sort-by(blc, ble), [])
+      fl = ftys.length()
+      if fl == 0:
+        # this means there are no branches, so there is no type.
+        return(branchCompatible(nmty("Nothing")))
+      else if fl == 1:
+        return(branchCompatible(ftys.first))
+      else:
+        return(branchIncompatible(ftys))
+      end
+    end)
+where:
+  eval(tc-branches([return(dynType), return(anyType)]), [], [], [], default-type-env)
+    is branchCompatible(anyType)
+  eval(tc-branches([return(dynType), return(anyType),return(nmty("Bool"))]), [], [], [], default-type-env)
+    is branchIncompatible([anyType, nmty("Bool")])
+  eval(tc-branches([return(dynType), return(bigLamType(["T"], appty("Option", ["T"]))),
+        return(appty("Option", ["Bool"])), return(appty("Option", ["String"]))]), [], [], [], default-type-env)
+    is branchIncompatible([appty("Option", ["Bool"]), appty("Option", ["String"])])
+  eval(tc-branches([return(dynType), return(bigLamType(["T"], appty("Option", ["T"]))),
+        return(bigLamType(["U"], appty("Option", ["U"]))), return(appty("Option", ["String"]))]), [], [], [], default-type-env)
+    is branchCompatible(appty("Option", ["String"]))
+
+end
+
 fun tc-app(l :: Loc, fn :: A.Expr, args :: List<A.Expr>) -> TCST<Type>:
   tc(fn)^bind(fun(fn-ty):
       cases(Type) fn-ty:
@@ -1734,6 +1783,24 @@ fun tc-app(l :: Loc, fn :: A.Expr, args :: List<A.Expr>) -> TCST<Type>:
           add-error(l, msg(errApplyNonFunction(fmty(fn-ty))))^seq(return(dynType))
       end
     end)
+end
+
+fun tc-if(l, branches, elsebranch) -> TCST<Type>:
+  sequence(branches.map(fun(branch):
+        tc(branch.test)^bind(fun(ty):
+            if tycompat(nmty("Bool"), ty):
+              return(nothing)
+            else:
+              add-error(branch.l, msg(errIfTestNotBool(fmty(ty))))
+            end
+          end)
+      end))^seq(
+    tc-branches([tc(elsebranch)] + branches.map(_.body).map(tc))^bind(fun(br):
+        cases(TCBranchRes) br:
+          | branchIncompatible(tys) => add-error(l, msg(errIfBranchType(tys.map(fmty))))^seq(return(dynType))
+          | branchCompatible(ty) => return(ty)
+        end
+      end))
 end
 
 fun tc-cases(l :: Loc, _type :: A.Ann, val :: A.Expr, branches :: List<A.CasesBranch>, _branches-ty :: Type) -> TCST<Type>:
@@ -1960,33 +2027,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                         end)
                     end)
                 | s_assign(l, id, val) => return(dynType)
-                | s_if_else(l, branches, elsebranch) =>
-                  tc(elsebranch)^bind(fun(_branches-ty):
-                      sequence(branches.map(fun(branch):
-                            tc(branch.test)^bind(fun(ty):
-                                if tycompat(nmty("Bool"), ty):
-                                  return(nothing)
-                                else:
-                                  add-error(branch.l, msg(errIfTestNotBool(fmty(ty))))
-                                end
-                              end)
-                          end))^seq(
-                        (for foldm(branches-ty from _branches-ty, branch from branches):
-                            tc(branch.body)^bind(fun(branchty):
-                                if branches-ty == anyType: # was no else branch
-                                  return(branchty)
-                                else:
-                                  if tycompat(branchty, branches-ty):
-                                    return(branchty)
-                                  else:
-                                    add-error(branch.l,
-                                      msg(errIfBranchType(fmty(branches-ty), fmty(branchty)))
-                                      )^seq(return(branches-ty))
-                                  end
-                                end
-                              end)
-                          end))
-                    end)
+                | s_if_else(l, branches, elsebranch) => tc-if(l, branches, elsebranch)
                 | s_lam(l, ps, args, ann, doc, body, ck) =>
                   # NOTE(dbp 2013-11-03): Check for type shadowing.
                   bind-params(ps,
