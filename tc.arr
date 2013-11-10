@@ -319,6 +319,9 @@ data TCError:
   | errAnnDotNotSupported(obj, field) with: tostring(self):
       "Dotted annotations are currently not supported, so we are treating " + self.obj + "." + self.field + " as the Dynamic type."
     end
+  | errFunctionArgumentsIncompatible(fnty, arg-tys) with: tostring(self):
+      "Function with type " + self.fnty + " not compatible with arguments " + self.arg-tys.join-str(", ") + "."
+    end
 end
 
 fun msg(err :: TCError) -> String:
@@ -642,6 +645,26 @@ fun tysolve(vars :: List<String>, _eqs :: List<Pair<Type, Type>>, tys :: List<Ty
         recgen-int(r1.fields, r2.fields)
       end
     end
+    fun solve-nested(_params :: List<String>, _t1 :: Type, _t2 :: Type) -> List<Pair<String, Type>>:
+      to-rename = _params.filter(vars.member(_))
+      not-to-rename = _params.filter(fun(p): not vars.member(p) end)
+      # a hack in the true spirit - prefix by equal number _ as the longest identifier in vars.
+      # as long as we don't go deep (2 or 3 max), the exponential nature of this shouldn't matter.
+      max-len = vars.map(_.length()).foldr(fun(x, m): if x > m: x else: m end end, 0)
+      t1 = for fold(acc from _t1, r from to-rename):
+        replace(r, nmty("_".repeat(max-len) + r), acc)
+      end
+      t2 = for fold(acc from _t2, r from to-rename):
+        replace(r, nmty("_".repeat(max-len) + r), acc)
+      end
+      params = to-rename.map("_".repeat(max-len) + _) + not-to-rename
+      rel-vars = vars.filter(fun(v): appears(v, t1) or appears(v, t2) end)
+      cases(TySolveRes) tysolve(params + rel-vars, [pair(t1, t2)], rel-vars.map(nmty)):
+        | allSolved(inner-eqs) => zip2(rel-vars, inner-eqs)
+        | someSolved(inner-eqs) => zip2(rel-vars, inner-eqs)
+        | incompatible => raise(nothing)
+      end
+    end
     cases(List) eqs:
       | empty => empty
       | link(tp, r) =>
@@ -656,15 +679,18 @@ fun tysolve(vars :: List<String>, _eqs :: List<Pair<Type, Type>>, tys :: List<Ty
                       link(pair(t2.name, t1), congen(r))
                   else if is-dynType(t2):
                     congen(r)
+                  else if is-bigLamType(t2):
+                    solve-nested(t2.params, t2.type, t1)
                   else:
                     raise(nothing)
                   end
                 end
               | anonType(rec1) =>
                 (cases(Type) t2:
-                  | anonType(rec2) =>
-                    recgen(rec1, rec2)
-                  | else => raise(nothing)
+                    | anonType(rec2) =>
+                      recgen(rec1, rec2)
+                    | bigLamType(params, type) => solve-nested(params, type, t1)
+                    | else => raise(nothing)
                   end) + congen(r)
               | arrowType(args1, ret1, rec1) =>
                 cases(Type) t2:
@@ -675,6 +701,7 @@ fun tysolve(vars :: List<String>, _eqs :: List<Pair<Type, Type>>, tys :: List<Ty
                       congen(link(pair(ret1, ret2), zip2(args1, args2))) +
                       recgen(rec1, rec2) + congen(r)
                     end
+                  | bigLamType(params, type) => solve-nested(params, type, t1)
                   | else =>
                     if is-nameType(t2) and vars.member(t2.name):
                       link(pair(t2.name, t1), congen(r))
@@ -691,6 +718,7 @@ fun tysolve(vars :: List<String>, _eqs :: List<Pair<Type, Type>>, tys :: List<Ty
                       congen(link(pair(self1, self2), link(pair(ret1, ret2), zip2(args1, args2)))) +
                       recgen(rec1, rec2) + congen(r)
                     end
+                  | bigLamType(params, type) => solve-nested(params, type, t1)
                   | else =>
                     if is-nameType(t2) and vars.member(t2.name):
                       link(pair(t2.name, t1), congen(r))
@@ -706,6 +734,7 @@ fun tysolve(vars :: List<String>, _eqs :: List<Pair<Type, Type>>, tys :: List<Ty
                     else:
                       congen(zip2(args1, args2)) + congen(r)
                     end
+                  | bigLamType(params, type) => solve-nested(params, type, t1)
                   | else =>
                     if is-nameType(t2) and vars.member(t2.name):
                       link(pair(t2.name, t1), congen(r))
@@ -713,6 +742,7 @@ fun tysolve(vars :: List<String>, _eqs :: List<Pair<Type, Type>>, tys :: List<Ty
                       raise(nothing)
                     end
                 end
+              | bigLamType(params, type) => solve-nested(params, type, t2)
               | dynType =>
                 if t2 == dynType:
                   congen(r)
@@ -892,6 +922,25 @@ where:
   tysolve(["T"], [pair(appty("Foo", ["T"]), appty("Foo", [anyType]))], [nmty("T")]) is allSolved([anyType])
 
   tysolve(["T", "U"], [pair(nmty("T"), nmty("String"))], [nmty("T"), nmty("U")]) is someSolved([nmty("String"), dynType])
+
+  tysolve(["U"], [pair(nmty("U"), nmty("Bool")),
+      pair(bigLamType(["T"], appty("Foo", [nmty("T")])), appty("Foo", ["String"]))], [nmty("U")])
+  is allSolved([nmty("Bool")])
+
+  tysolve(["U", "V"], [
+      pair(bigLamType(["T"], appty("Foo", [nmty("T"), nmty("V"), nmty("Bool")])), appty("Foo", ["String", "Number", "U"]))], [nmty("U"), nmty("V")])
+  is allSolved([nmty("Bool"), nmty("Number")])
+
+  tysolve(["U"], [pair(bigLamType(["T"], appty("Foo", [nmty("T"), nmty("Bool")])), appty("Foo", ["String", "U"]))], [nmty("U")])
+  is allSolved([nmty("Bool")])
+
+  tysolve(["T"], [pair(nmty("T"), nmty("Bool")),
+      pair(bigLamType(["T"], appty("Foo", [nmty("T")])), appty("Foo", ["String"]))], [nmty("T")])
+  is allSolved([nmty("Bool")])
+
+  tysolve(["T"], [pair(nmty("T"), nmty("Bool")),
+      pair(appty("Foo", ["String"]), bigLamType(["T"], appty("Foo", [nmty("T")])))], [nmty("T")])
+  is allSolved([nmty("Bool")])
 end
 
 
@@ -1642,6 +1691,22 @@ fun tc-app(l :: Loc, fn :: A.Expr, args :: List<A.Expr>) -> TCST<Type>:
                   end)^bind(fun(p): return(p.b) end)
               end)
           end
+        | bigLamType(params, ty1) =>
+          cases(Type) ty1:
+            | arrowType(arg-types, ret-type, rec-type) =>
+              sequence(args.map(tc))^bind(fun(arg-vals):
+                  cases(TySolveRes) tysolve(params, zip2(arg-types, arg-vals), [ret-type]):
+                    | allSolved(vs) => return(vs.first)
+                    | someSolved(vs) =>
+                      # NOTE(dbp 2013-11-09): Add warning - ret type has dynType due to underspecification
+                      return(vs.first)
+                    | incompatible =>
+                      add-error(l, msg(errFunctionArgumentsIncompatible(fmty(ty1), arg-vals.map(fmty))))^seq(return(dynType))
+                  end
+                end)
+            | else =>
+              add-error(l, msg(errApplyNonFunction(fmty(fn-ty))))^seq(return(dynType))
+          end
           # NOTE(dbp 2013-10-16): Not really anything we can do. Odd, but...
         | dynType => return(dynType)
         | else =>
@@ -2025,6 +2090,7 @@ fun usage():
   print("Usage:\n
    raco pyret tc.arr tests (runs all tests)\n
    raco pyret tc.arr file.arr (runs single file)\n\n(running basic unit tests)\n")
+  nothing
 end
 fun format-errors(ers):
   cases(List) ers:
