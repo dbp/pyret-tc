@@ -11,7 +11,7 @@ And then build it:
 
     raco make tc.arr
 
-(This will take a while - on my desktop, it takes ~80 seconds. On a
+(This will take a while - on my desktop, it takes ~40 seconds. On a
 recent laptop, it should take maybe double that.)
 
 Now run:
@@ -41,7 +41,7 @@ Now run:
 
 
 **NOTE**: It is currently quite slow. On my recent desktop i7, running the
-  whole test suite (currently 59 small programs) takes about 85 seconds.
+  whole test suite (currently 60 small programs) takes about 40 seconds.
 
 
 If you want to only run the unit tests:
