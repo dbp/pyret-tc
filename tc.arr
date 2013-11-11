@@ -603,8 +603,8 @@ fun replace(v :: String, nt :: Type, t :: Type) -> Type:
       if params.member(v): t
       else: bigLamType(params, replace(v, nt, type))
       end
-    | dynType => false
-    | anyType => false
+    | dynType => t
+    | anyType => t
   end
 end
 
@@ -1567,7 +1567,9 @@ default-type-env = [
                 [arrowType([nmty("T"), nmty("T")], nmty("Bool"), moreRecord([])),
                   arrowType([nmty("T"), nmty("T")], nmty("Bool"), moreRecord([]))], appty("List", ["T"]))),
             pair("sort", app-mty("List", "T", [], appty("List", ["T"]))),
-            pair("join-str", app-mty("List", "T", ["String"], appty("List", ["T"])))
+            pair("join-str", app-mty("List", "T", ["String"], appty("List", ["T"]))),
+            pair("_plus", app-mty("List", "T", [appty("List", ["T"])], appty("List", ["T"]))),
+            pair("push", app-mty("List", "T", [nmty("T")], appty("List", ["T"])))
           ])))),
   pair(nameType("Option"), typeAlias(bigLamType(["T"], appType("Option", [nmty("T")])))),
   pair(bigLamType(["T"], appType("Option", [nmty("T")])), typeNominal(anonType(moreRecord([])))),
@@ -1830,6 +1832,7 @@ fun tc-app(l :: Loc, fn :: A.Expr, args :: List<A.Expr>) -> TCST<Type>:
                     end
                   end)
               end
+            | dynType => return(dynType)
             | else =>
               add-error(l, msg(errApplyNonFunction(fmty(fn-ty))))^seq(return(dynType))
           end
@@ -1874,12 +1877,15 @@ fun tc-bracket(l :: Loc, obj :: A.Expr, field :: A.Expr) -> TCST<Type>:
         cases(RecordType) record:
           | normalRecord(fields) =>
             cases(Option) map-get(fields, s):
-              | none => add-error(l, msg(errFieldNotFound(s)))^seq(return(dynType))
-              | some(ty) => return(method-apply(ty))
+              | none =>
+                add-error(l, msg(errFieldNotFound(s)))^seq(return(dynType))
+              | some(ty) =>
+                return(method-apply(ty))
             end
           | moreRecord(fields) =>
             cases(Option) map-get(fields, s):
-              | none => return(dynType)
+              | none =>
+                return(dynType)
               | some(ty) => return(method-apply(ty))
             end
         end
@@ -1935,7 +1941,14 @@ fun tc-bracket(l :: Loc, obj :: A.Expr, field :: A.Expr) -> TCST<Type>:
               end)
           | anonType(record) => record-lookup(record)
           | nameType(_) => record-type-lookup(obj-ty)
-          | bigLamType(params,t) => record-type-lookup(obj-ty)^bind(fun(r): return(bigLamType(params, r)) end)
+          | bigLamType(params,t) =>
+            record-type-lookup(obj-ty)^bind(fun(r):
+                if list.any(fun(x): x end, params.map(appears(_, r))):
+                  return(bigLamType(params, r))
+                else:
+                  return(r)
+                end
+              end)
         end
       end
       tc(obj)^bind(rec-loo-help)
@@ -2080,7 +2093,8 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
         get-bindings(ast)^bind(fun(bindings):
             add-bindings(bindings,
               cases(A.Expr) ast:
-                | s_block(l, stmts) => sequence(stmts.map(tc))^bind(
+                | s_block(l, stmts) =>
+                  sequence(stmts.map(tc))^bind(
                     fun(tys):
                       return(if tys == []: nmty("Nothing") else: tys.last() end)
                     end)
