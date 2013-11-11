@@ -2105,6 +2105,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                 | s_let(l, name, val) => tc-let(l, name, val)
                 | s_assign(l, id, val) => return(dynType)
                 | s_if_else(l, branches, elsebranch) => tc-if(l, branches, elsebranch)
+                | s_try(l, body, id, _except) => tc(body)^seq(add-bindings([pair(id.id, id.ann)], tc(_except)))
                 | s_lam(l, ps, args, ann, doc, body, ck) =>
                   # NOTE(dbp 2013-11-03): Check for type shadowing.
                   bind-params(ps,
