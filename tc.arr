@@ -21,11 +21,13 @@
 #                                                                              #
 ################################################################################
 
+provide {
+  report: tc-report,
+  file: tc-file
+} end
+
 import pyret-eval as E
 import ast as A
-import directory as D
-import file as F
-import Racket as Racket
 Loc = error.Location
 loc = error.location
 
@@ -2191,91 +2193,4 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
       )
     end
     )
-end
-
-
-################################################################################
-# Testing harness helpers.                                                     #
-################################################################################
-
-fun build-path(parts):
-  parts.join-str("/")
-end
-fun str-ends-with(s1,s2):
-  s1.substring(s1.length() - s2.length(), s1.length()) == s2
-end
-fun str-starts-with(s1,s2):
-  s1.substring(0, s2.length()) == s2
-end
-fun strip-ext(s):
-  s.substring(0, s.length() - 4)
-end
-
-fun is-code-file(path):
-  path^str-ends-with(".arr") and (not path^str-starts-with("."))
-end
-
-
-################################################################################
-# Testing harness commandline driver.                                          #
-################################################################################
-
-var files = []
-baseR = Racket("racket/base")
-cmdlineargs = baseR("vector->list", baseR("current-command-line-arguments"))
-fun usage():
-  print("Usage:\n
-   raco pyret tc.arr tests (runs all tests)\n
-   raco pyret tc.arr file.arr (runs single file)\n\n(running basic unit tests)\n")
-  nothing
-end
-fun format-errors(ers):
-  cases(List) ers:
-    | empty => "No type errors detected."
-    | link(_,_) => ers.map(torepr).join-str("\n")
-  end
-end
-if cmdlineargs.length() == 1:
-  usage()
-else:
-  mode = cmdlineargs.get(1)
-  if mode == "tests":
-    files := D.dir("tests").list().map(fun(path): build-path(["tests", path]) end)
-  # NOTE(dbp 2013-11-03): Really need a commandline parsing library...
-  else if (mode == "report") or
-    ((cmdlineargs.get(0) == "--no-checks") and (cmdlineargs.get(2) == "report")):
-    path = cmdlineargs.get(if mode == "report": 2 else: 3 end)
-    tc-report(path, F.input-file(path).read-file())
-  else if baseR("file-exists?", mode):
-    files := [mode]
-  else:
-    usage()
-  end
-
-  check:
-  files.map(fun(path):
-      when is-code-file(path):
-        # NOTE(dbp 2013-09-29): We run the .arr file. It expects to
-        # have a corresponding .err file.  if .err is non-empty, we
-        # expect to see an error that matches the content of that
-        # file. If it is empty, we expect it to produce nothing as the
-        # output of type checking.
-        stripped = strip-ext(path)
-        print("Running " + stripped)
-        errpath = stripped + ".err"
-        code = F.input-file(path).read-file()
-        err = F.input-file(errpath).read-file()
-        if err.length() <> 0:
-          err-msg = format-errors(tc-file(path, code))
-          pair(path,pair(err-msg, err-msg.contains(err)))
-          is pair(path, pair(err-msg, true))
-        else:
-          err-msg = format-errors(tc-file(path, code))
-          pair(path, pair(err-msg,
-              err-msg.contains("No type errors detected.")))
-          is pair(path,pair(err-msg, true))
-        end
-      end
-    end)
-  end
 end
