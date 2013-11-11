@@ -1040,7 +1040,7 @@ where:
       A.s_datatype_constructor(dummy-loc, "self", A.s_id(dummy-loc, "self")))),
     [], [],[],default-type-env)
   is
-  [pair("foo", bigLamType(["T"],arrowType([strty], footy, moreRecord([])))),
+  [pair("foo", bigLamType(["T"],arrowType([strty], appty("Foo", ["T"]), moreRecord([])))),
     pair("is-foo", arrowType([anyType], boolty, moreRecord([])))]
 
 
@@ -1993,7 +1993,7 @@ fun tc-cases(l :: Loc, _type :: A.Ann, val :: A.Expr, branches :: List<A.CasesBr
                               | arrowType(args, ret, rec) =>
                                 if args.length() <> branch.args.length():
                                   add-error(branch.l,
-                                    msg(errCasesPatternNumberFields(branch.name, 0, branch.args.length()))
+                                    msg(errCasesPatternNumberFields(branch.name, args.length(), branch.args.length()))
                                     )^seq(return(dynType))
                                 else:
                                   add-bindings(for map2(bnd from branch.args,
