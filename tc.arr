@@ -1904,7 +1904,6 @@ fun tc-bracket(l :: Loc, obj :: A.Expr, field :: A.Expr) -> TCST<Type>:
                   | anyType => return(dynType)
                   | dynType => return(dynType)
                   | appType(_,_,_) => return(dynType)
-                    # NOTE(dbp 2013-11-05): Not doing cycle detection in type env. Could go into an infinite loop.
                   | nameType(_) =>
                     if (not Nothing(loop-point)) and identical(loop-point, recordbind.type):
                       # don't go into an infinite loop.
