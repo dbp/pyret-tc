@@ -1,5 +1,7 @@
 #lang pyret
 
+#! Found branches with incompatible types: Number, String.
+
 data Foo:
   | foo
   | bar

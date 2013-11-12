@@ -1,5 +1,7 @@
 #lang pyret
 
+#! variant pattern for cases branch foo should have 3 fields, not 1
+
 data Foo:
   | foo(a,b,c)
   | bar

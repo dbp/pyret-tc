@@ -1,5 +1,7 @@
 #lang pyret
 
+#==
+
 fun foo(x :: String) -> String:
   x
 end

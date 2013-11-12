@@ -1,5 +1,7 @@
 #lang pyret
 
+#! value in cases expression should have type Option<Number>, but has incompatible type Option<String>
+
 x = ["Foo"]
 
 cases(Option<Number>) x.find(fun(x): true end):

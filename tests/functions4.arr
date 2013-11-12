@@ -1,5 +1,7 @@
 #lang pyret
 
+#==
+
 fun foo():
   bar()
 end

@@ -1622,7 +1622,8 @@ fun tc-main(p, s):
 end
 
 fun tc-file(p, s):
-  tc-main(p,s).errors
+  res = tc-main(p,s)
+  {errors: res.errors}
 end
 
 fun tc-report(p, s):

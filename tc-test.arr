@@ -27,6 +27,24 @@ import Racket as Racket
 import file as F
 import directory as D
 
+
+################################################################################
+# Note about test file format:                                                 #
+#                                                                              #
+# The tests are .arr files that have special comments in them indicating       #
+# warnings or errors that should occur. Any line starting with:                #
+# '#! ' is interpreted to be a string that should match against an error, for  #
+# example, '#! identifier x was defined to have type List<String>'.            #
+#                                                                              #
+# Warnings should start with '#~ ', and have the same pattern. The placement   #
+# of these comments does not matter, but at least currently, the convention is #
+# to place them all at the top of the file.                                    #
+#                                                                              #
+# Finally, the special marker #= means that there should be no errors, and #== #
+# means no warnings as well.                                                   #
+################################################################################
+
+
 ################################################################################
 # Testing harness helpers.                                                     #
 ################################################################################
@@ -56,6 +74,16 @@ fun is-code-file(path):
   path^str-ends-with(".arr") and (not path^str-starts-with("."))
 end
 
+fun splitn(str :: String, needle :: String) -> List<String>:
+  doc: "Keep splitting (like I wish the string split method would)"
+  x = str.split(needle, false)
+  if x.length() == 1:
+    x
+  else:
+    link(x.first, splitn(x.rest.first, needle))
+  end
+end
+
 
 ################################################################################
 # Testing harness commandline driver.                                          #
@@ -65,12 +93,6 @@ var files = []
 baseR = Racket("racket/base")
 cmdlineargs = baseR("vector->list", baseR("current-command-line-arguments"))
 
-fun format-errors(ers):
-  cases(List) ers:
-    | empty => "No type errors detected."
-    | link(_,_) => ers.map(torepr).join-str("\n")
-  end
-end
 if cmdlineargs.length() == 1:
   files := D.dir("tests").list().map(fun(path): build-path(["tests", path]) end)
   nothing
@@ -79,29 +101,112 @@ else:
   nothing
 end
 
+
+fun format-errors(ers):
+  cases(List) ers:
+    | empty => ""
+    | link(_,_) => ers.map(_.b).map(tostring).join-str("\n")
+  end
+end
+
+data EWConfig:
+  | errsWarns(errors :: List<String>, warns :: List<String>)
+  | noErrs(warns :: List<String>)
+  | noErrsWarns
+end
+
+fun extract-errs-warns(fname :: String, c :: String) -> EWConfig:
+  var ers = []
+  var wrns = []
+  var noers = false
+  var noerswrns = false
+  fun h(s :: List<String>) -> Nothing:
+    cases(List) s:
+      | empty => nothing
+      | link(f, r) =>
+        if str-starts-with(f, "#=="):
+          noerswrns := true
+        else if str-starts-with(f, "#="):
+          noers := true
+        else if str-starts-with(f, "#! "):
+          ers := ers + [f.substring(3, 1000000)]
+        else if str-starts-with(f, "#~ "):
+          wrns := wrns + [f.substring(3, 1000000)]
+        else:
+          nothing
+        end
+        h(r)
+    end
+  end
+  h(splitn(c, "\n").map(tostring))
+  if noerswrns:
+    if (ers <> []) or (wrns <> []):
+      raise("tc-test: error in test file " + fname + ", has #== and error/warning markers.")
+    else:
+      noErrsWarns
+    end
+  else if noers:
+    if ers <> []:
+      raise("tc-test: error in test file " + fname + ", has #== and error markers.")
+    else:
+      noErrs(wrns)
+    end
+  else:
+    if (ers == []) and (wrns == []):
+      raise("tc-test: test file " + fname + " did not declare any errors, warnings, or that it shouldn't have them.")
+    else:
+      errsWarns(ers, wrns)
+    end
+  end
+where:
+  # NOTE(dbp 2013-11-11): I'm commenting these out because they distort the test count. Errp..
+  # When editing the above function, uncomment them!
+  #
+  # extract-errs-warns("", "#== \nfoo\nbar\n#blah") is noErrsWarns
+  # extract-errs-warns("", "#= \nfoo\nbar\n#~ some warning\n") is noErrs(["some warning"])
+  # extract-errs-warns("", "#! something\nfoo\nbar\n#~ some warning\n")
+  # is errsWarns(["something"],["some warning"])
+end
+
+
+# NOTE(dbp 2013-11-11): This silliness is to get the things that are printed out on
+# failing tests to be friendly.
+data ErrPair:
+  | errPair(msg, ers)
+end
+
+fun ep-contains(ep):
+  ep.ers.contains(ep.msg)
+end
+
+data NoErrs:
+  | noErrorsIn(ers)
+end
+
+fun is-blank(noe):
+  noe.ers == ""
+end
+
 check:
   files.each(fun(path):
       when is-code-file(path):
-        # NOTE(dbp 2013-09-29): We run the .arr file. It expects to
-        # have a corresponding .err file.  if .err is non-empty, we
-        # expect to see an error that matches the content of that
-        # file. If it is empty, we expect it to produce nothing as the
-        # output of type checking.
-        stripped = strip-ext(path)
-        print("Running " + stripped)
-        errpath = stripped + ".err"
+        print("Running " + path)
         code = F.input-file(path).read-file()
-        err = F.input-file(errpath).read-file()
-        if err.length() <> 0:
-          err-msg = format-errors(tc.file(path, code))
-          pair(path,pair(err-msg, err-msg.contains(err)))
-          is pair(path, pair(err-msg, true))
-        else:
-          err-msg = format-errors(tc.file(path, code))
-          pair(path, pair(err-msg,
-              err-msg.contains("No type errors detected.")))
-          is pair(path,pair(err-msg, true))
+
+        result = tc.file(path, code)
+
+        cases(EWConfig) extract-errs-warns(path, code):
+          | errsWarns(errors, warns) =>
+            fmtd = format-errors(result.errors)
+            for each(err from errors):
+              errPair(err, fmtd) satisfies ep-contains
+            end
+          | noErrs(warns) =>
+            noErrorsIn(format-errors(result.errors)) satisfies is-blank
+          | noErrsWarns =>
+            noErrorsIn(format-errors(result.errors)) satisfies is-blank
         end
+
       end
     end)
 end

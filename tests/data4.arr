@@ -1,5 +1,7 @@
 #lang pyret
 
+#==
+
 data Foo:
   | a(x)
   | b(y)

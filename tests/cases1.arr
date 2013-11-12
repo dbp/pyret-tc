@@ -1,5 +1,7 @@
 #lang pyret
 
+#! value in cases expression should have type Foo
+
 data Foo:
   | foo
   | bar
