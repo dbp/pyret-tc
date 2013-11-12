@@ -42,11 +42,14 @@ The tests are normal Pyret programs that have information in special comments
 that specify what errors and warnings, if any, the program should result in.
 
 
-If you'd like to run the unit tests inside the type checker, you have
-to first clear out the compiled code from `raco make` above:
+If you'd like to run the unit tests built into the type checker, you can run:
 
-    rm -r compiled/
+    raco pyret tc-unit.arr
 
-Now run:
-
-    raco pyret tc.arr
+**NOTE**: This is a hack - tc-unit.arr is just a symlink to tc.arr,
+  because once you `raco make tc.arr`, if you try to run it, it will
+  run the compiled version, which doesn't have the unit tests. So
+  instead we run the same file with a different name (by way of a
+  symlink) and it all works.  If you are on a platform that doesn't
+  have symlinks, this probably won't work, and you can just removed
+  the `compiled` directory and then run `raco pyret tc.arr`.
