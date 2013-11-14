@@ -22,8 +22,8 @@
 ################################################################################
 
 provide {
-  report: tc-report,
-  file: tc-file
+  main: tc-main,
+  format-type: fmty
 } end
 
 import pyret-eval as E
@@ -402,14 +402,6 @@ where:
   fmty(appType("Option", [nmty("Element")])) is "Option<Element>"
   fmty(bigLamType(["T"], appType("List", [nmty("T")]))) is "List[T]<T>"
   fmty(appType("Either", [nmty("T"), nmty("U")])) is "Either<T, U>"
-end
-
-fun pretty-error(ep :: Pair<Loc, String>) -> String:
-  "Line " + tostring(ep.a.line) + ", Column " + tostring(ep.a.column) + " - " + ep.b
-end
-
-fun pretty-iif(iif :: Pair<String, Type>) -> String:
-  "fun " + iif.a + " :: " + fmty(iif.b)
 end
 
 ################################################################################
@@ -1654,27 +1646,6 @@ fun tc-main(p, s):
   run(tc-prog(stx.with-types), [], [], iifs, env, default-type-env)
 end
 
-fun tc-file(p, s):
-  res = tc-main(p,s)
-  {errors: res.errors, warnings: res.warnings}
-end
-
-fun tc-report(p, s):
-  print("Report for " + p + ":\n\n")
-  result = tc-main(p,s)
-  if result.errors.length() <> 0:
-    print("Errors detected:\n")
-    print(result.errors.map(pretty-error).join-str("\n"))
-  else:
-    print("No type errors detected.")
-  end
-  when result.iifs.length() <> 0:
-    print("\n\nTop level inferred functions:\n")
-    print(result.iifs.map(pretty-iif).join-str("\n"))
-  end
-  print("\n")
-end
-
 fun tc-prog(prog :: A.Program) -> TCST<Type>:
   tc(prog.block)
 end
@@ -2152,8 +2123,13 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                               tc(body)^bind(fun(body-ty):
                                   subtype(l, body-ty, ret-ty)^bind(fun(st):
                                       if st:
-                                        return(params-wrap(ps, arrowType(new-binds.map(fun(bnd): bnd.b end),
+                                        (if (body-ty == dynType) and (ret-ty <> dynType):
+                                            add-warning(l, wmsg(warnFunctionBodyDyn(fmty(ret-ty))))
+                                          else: return(nothing)
+                                          end)^seq(
+                                          return(params-wrap(ps, arrowType(new-binds.map(fun(bnd): bnd.b end),
                                               ret-ty, moreRecord([]))))
+                                          )
                                       else:
                                         add-error(l,
                                           msg(errFunctionAnnIncompatibleReturn(fmty(body-ty), fmty(ret-ty))))^seq(

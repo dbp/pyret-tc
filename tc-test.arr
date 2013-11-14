@@ -49,6 +49,12 @@ import directory as D
 # Testing harness helpers.                                                     #
 ################################################################################
 
+fun tc-file(p, s):
+  res = tc.main(p,s)
+  {errors: res.errors, warnings: res.warnings}
+end
+
+
 data Pair:
   | pair(a,b)
 sharing:
@@ -195,7 +201,7 @@ check:
         print("Running " + path)
         code = F.input-file(path).read-file()
 
-        result = tc.file(path, code)
+        result = tc-file(path, code)
         fmtd-errs = format-lines(result.errors)
         fmtd-warns = format-lines(result.warnings)
 

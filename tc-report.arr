@@ -26,6 +26,36 @@ import "tc.arr" as tc
 import Racket as Racket
 import file as F
 
+fun pretty-error(ep :: {a :: {line :: Number, column :: Number}, b :: String}) -> String:
+  "Line " + tostring(ep.a.line) + ", Column " + tostring(ep.a.column) + " - " + ep.b
+end
+
+fun pretty-iif(iif) -> String:
+  "fun " + iif.a + " :: " + tc.format-type(iif.b)
+end
+
+fun tc-report(p, s):
+  print("Report for " + p + ":")
+  result = tc.main(p,s)
+  if result.errors.length() <> 0:
+    print("\n\nErrors detected:\n")
+    print(result.errors.map(pretty-error).join-str("\n"))
+  else:
+    print("\n\nNo type errors detected.")
+  end
+  if result.warnings.length() <> 0:
+    print("\n\nWarnings detected:\n")
+    print(result.warnings.map(pretty-error).join-str("\n"))
+  else:
+    print("\n\nNo type warnings detected.")
+  end
+  when result.iifs.length() <> 0:
+    print("\n\nTop level inferred functions:\n")
+    print(result.iifs.map(pretty-iif).join-str("\n"))
+  end
+  print("\n")
+end
+
 baseR = Racket("racket/base")
 cmdlineargs = baseR("vector->list", baseR("current-command-line-arguments"))
 
@@ -38,6 +68,6 @@ if cmdlineargs.length() == 1:
   usage()
 else:
   path = cmdlineargs.last()
-  tc.report(path, F.input-file(path).read-file())
+  tc-report(path, F.input-file(path).read-file())
   nothing
 end
