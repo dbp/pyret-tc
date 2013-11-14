@@ -102,7 +102,7 @@ else:
 end
 
 
-fun format-errors(ers):
+fun format-lines(ers):
   cases(List) ers:
     | empty => ""
     | link(_,_) => ers.map(_.b).map(tostring).join-str("\n")
@@ -171,16 +171,18 @@ end
 
 # NOTE(dbp 2013-11-11): This silliness is to get the things that are printed out on
 # failing tests to be friendly.
-data ErrPair:
+data ErrWarnPair:
   | errPair(msg, ers)
+  | warnPair(msg, ers)
 end
 
-fun ep-contains(ep):
-  ep.ers.contains(ep.msg)
+fun ew-contains(ew):
+  ew.ers.contains(ew.msg)
 end
 
-data NoErrs:
+data NoErrsWarns:
   | noErrorsIn(ers)
+  | noWarnsIn(ers)
 end
 
 fun is-blank(noe):
@@ -194,17 +196,25 @@ check:
         code = F.input-file(path).read-file()
 
         result = tc.file(path, code)
+        fmtd-errs = format-lines(result.errors)
+        fmtd-warns = format-lines(result.warnings)
 
         cases(EWConfig) extract-errs-warns(path, code):
           | errsWarns(errors, warns) =>
-            fmtd = format-errors(result.errors)
             for each(err from errors):
-              errPair(err, fmtd) satisfies ep-contains
+              errPair(err, fmtd-errs) satisfies ew-contains
+            end
+            for each(warn from warns):
+              warnPair(warn, fmtd-warns) satisfies ew-contains
             end
           | noErrs(warns) =>
-            noErrorsIn(format-errors(result.errors)) satisfies is-blank
+            noErrorsIn(fmtd-errs) satisfies is-blank
+            for each(warn from warns):
+              warnPair(warn, fmtd-warns) satisfies ew-contains
+            end
           | noErrsWarns =>
-            noErrorsIn(format-errors(result.errors)) satisfies is-blank
+            noErrorsIn(fmtd-errs) satisfies is-blank
+            noWarnsIn(fmtd-warns) satisfies is-blank
         end
 
       end

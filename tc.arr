@@ -48,6 +48,11 @@ data TypeError:
   | typeError(location :: Loc, message :: String)
 end
 
+data TypeWarning:
+  | typeWarning(location :: Loc, message :: String)
+end
+
+
 data Type:
   | dynType
   | anyType
@@ -117,6 +122,7 @@ data TCstate:
   | tcst(
       value,
       errors :: List<TypeError>,
+      warnings :: List<TypeWarning>,
       iifs :: List<Pair<String, Type>>,
       env :: List<Pair<String, Type>>,
       type-env :: List<Pair<String, TypeBinding>>
@@ -129,12 +135,12 @@ TCST = Function
 
 # First the fundamental monad functions
 fun return(v):
-  fun(er,i,e,t): tcst(v,er,i,e,t) end
+  fun(er,w,i,e,t): tcst(v,er,w,i,e,t) end
 end
 fun bind(mv, mf):
-  fun(er,i,e,t):
-    p = mv(er,i,e,t)
-    mf(p.value)(p.errors,p.iifs,p.env,p.type-env)
+  fun(er,w,i,e,t):
+    p = mv(er,w,i,e,t)
+    mf(p.value)(p.errors,p.warnings,p.iifs,p.env,p.type-env)
   end
 end
 fun seq(mv1, mv2):
@@ -160,62 +166,75 @@ end
 
 # After that, the state-related functions
 fun get-errors():
-  fun(er,i,e,t):
-    tcst(er,er,i,e,t)
+  fun(er,w,i,e,t):
+    tcst(er,er,w,i,e,t)
+  end
+end
+fun get-warnings():
+  fun(er,w,i,e,t):
+    tcst(w,er,w,i,e,t)
   end
 end
 fun get-iifs():
-  fun(er,i,e,t):
-    tcst(i,er,i,e,t)
+  fun(er,w,i,e,t):
+    tcst(i,er,w,i,e,t)
   end
 end
 fun get-env():
-  fun(er,i,e,t):
-    tcst(e,er,i,e,t)
+  fun(er,w,i,e,t):
+    tcst(e,er,w,i,e,t)
   end
 end
 fun get-type-env():
-  fun(er,i,e,t):
-    tcst(t,er,i,e,t)
+  fun(er,w,i,e,t):
+    tcst(t,er,w,i,e,t)
   end
 end
 fun put-errors(errors):
-  fun(er,i,e,t):
-    tcst(nothing,errors,i,e,t)
+  fun(er,w,i,e,t):
+    tcst(nothing,errors,w,i,e,t)
+  end
+end
+fun put-warnings(warnings):
+  fun(er,w,i,e,t):
+    tcst(nothing,er,warnings,i,e,t)
   end
 end
 fun put-iifs(iifs):
-  fun(er,i,e,t):
-    tcst(nothing,er,iifs,e,t)
+  fun(er,w,i,e,t):
+    tcst(nothing,er,w,iifs,e,t)
   end
 end
 fun put-env(env):
-  fun(er,i,e,t):
-    tcst(nothing,er,i,env,t)
+  fun(er,w,i,e,t):
+    tcst(nothing,er,w,i,env,t)
   end
 end
 fun put-type-env(type-env):
-  fun(er,i,e,t):
-    tcst(nothing,er,i,e,type-env)
+  fun(er,w,i,e,t):
+    tcst(nothing,er,w,i,e,type-env)
   end
 end
-fun run(st-prog, errs, iifs, env, type-env):
-  st-prog(errs,iifs,env,type-env)
+fun run(st-prog, errs, warns, iifs, env, type-env):
+  st-prog(errs,warns,iifs,env,type-env)
 end
-fun eval(st-prog, errs, iifs, env, type-env):
-  st-prog(errs,iifs,env,type-env).value
+fun eval(st-prog, errs, warns, iifs, env, type-env):
+  st-prog(errs,warns,iifs,env,type-env).value
 end
-fun exec-errors(st-prog, errs, iifs, env, type-env):
-  st-prog(errs,iifs,env,type-env).errors
+fun exec-errors(st-prog, errs, warns, iifs, env, type-env):
+  st-prog(errs,warns,iifs,env,type-env).errors
 end
-fun exec-iifs(st-prog, errs, iifs, env, type-env):
-  st-prog(errs,iifs,env,type-env).iifs
+fun exec-warns(st-prog, errs, warns, iifs, env, type-env):
+  st-prog(errs,warns,iifs,env,type-env).warnings
 end
-fun exec-env(st-prog, errs, iifs, env, type-env):
-  st-prog(errs,iifs,env,type-env).type-env
+fun exec-iifs(st-prog, errs, warns, iifs, env, type-env):
+  st-prog(errs,warns,iifs,env,type-env).iifs
 end
-fun exec-type-env(st-prog, errs, iifs, env, type-env):
-  st-prog(errs,iifs,env,type-env).type-env
+fun exec-env(st-prog, errs, warns, iifs, env, type-env):
+  st-prog(errs,warns,iifs,env,type-env).type-env
+end
+fun exec-type-env(st-prog, errs, warns, iifs, env, type-env):
+  st-prog(errs,warns,iifs,env,type-env).type-env
 end
 
 # And finally, application specific actions (note that errors are
@@ -223,6 +242,10 @@ end
 fun add-error(l,e):
   doc: "adds an error to the threaded state"
   get-errors()^bind(fun(errors): put-errors(errors + [pair(l,e)]) end)
+end
+fun add-warning(l,e):
+  doc: "adds a warning to the threaded state"
+  get-warnings()^bind(fun(warnings): put-warnings(warnings + [pair(l,e)]) end)
 end
 fun add-bindings(binds, mv):
   doc: "adds bindings to the env, in the context of a monadic value"
@@ -250,20 +273,20 @@ check:
   eval(
     add-error("l1", "error 1")^seq(add-error("l2", "error 2"))
       ^seq(return("hello")),
-    [], [], [], []
+    [], [], [], [], []
     ) is "hello"
   exec-errors(
     add-error("l1", "error 1")^seq(add-error("l2", "error 2"))
       ^seq(return("hello")),
-    [], [], [], []
+    [], [], [], [], []
     ) is [pair("l1","error 1"), pair("l2","error 2")]
   exec-env(
     add-bindings([pair("a", "T")], get-env()),
-    [], [], [], []
+    [], [], [], [], []
     ) is []
   eval(
     add-bindings([pair("a", "T")], get-env()),
-    [], [], [], []
+    [], [], [], [], []
     ) is [pair("a", "T")]
 end
 
@@ -329,8 +352,18 @@ data TCError:
     end
 end
 
+data TCWarning:
+  | warnFunctionBodyDyn(retty) with: tostring(self):
+      "Function body had " + self.retty + " specified as a return type, but type checker found Dyn."
+    end
+end
+
 fun msg(err :: TCError) -> String:
   tostring(err)
+end
+
+fun wmsg(warn :: TCWarning) -> String:
+  tostring(warn)
 end
 
 fun fmty(type :: Type) -> String:
@@ -991,7 +1024,7 @@ fun get-bindings(ast :: A.Expr) -> TCST<List<Pair<String, Type>>>:
   end
 where:
   fun gb-src(src):
-    eval(get-bindings(A.parse(src,"anonymous-file", { ["check"]: false}).with-types.block), [], [], [], default-type-env)
+    eval(get-bindings(A.parse(src,"anonymous-file", { ["check"]: false}).with-types.block), [], [], [], [], default-type-env)
   end
   gb-src("x = 2") is [pair("x", nmty("Number"))]
   gb-src("x = 2 y = x") is [ pair("y", nmty("Number")),
@@ -1031,7 +1064,7 @@ where:
     A.s_datatype_variant(dummy-loc, "foo",
     [],
     A.s_datatype_constructor(dummy-loc, "self", A.s_id(dummy-loc, "self")))),
-    [], [], [], default-type-env)
+    [], [], [], [], default-type-env)
   is
   [pair("foo", arrowType([], footy, moreRecord([]))),
     pair("is-foo", arrowType([anyType], boolty, moreRecord([])))]
@@ -1040,7 +1073,7 @@ where:
     A.s_datatype_variant(dummy-loc, "foo",
     [A.s_variant_member(dummy-loc, "normal", A.s_bind(dummy-loc, "a", A.a_name(dummy-loc, "String")))],
       A.s_datatype_constructor(dummy-loc, "self", A.s_id(dummy-loc, "self")))),
-    [], [],[],default-type-env)
+    [], [], [],[],default-type-env)
   is
   [pair("foo", bigLamType(["T"],arrowType([strty], appty("Foo", ["T"]), moreRecord([])))),
     pair("is-foo", arrowType([anyType], boolty, moreRecord([])))]
@@ -1053,7 +1086,7 @@ where:
     A.s_variant_member(dummy-loc, "normal",
         A.s_bind(dummy-loc, "b", A.a_name(dummy-loc, "Bool")))],
     A.s_datatype_constructor(dummy-loc, "self", A.s_id(dummy-loc, "self")))),
-    [], [],[],default-type-env)
+    [],[],[],[],default-type-env)
   is
   [pair("foo", arrowType([strty, boolty], footy, moreRecord([]))),
     pair("is-foo", arrowType([anyType], boolty, moreRecord([])))]
@@ -1075,7 +1108,7 @@ fun get-type-bindings(ast :: A.Expr) -> TCST<List<Pair<String>>>:
   end
 where:
   fun gtb-src(src):
-    eval(get-type-bindings(A.parse(src,"anonymous-file", { ["check"]: false}).with-types.block), [], [], [], [])
+    eval(get-type-bindings(A.parse(src,"anonymous-file", { ["check"]: false}).with-types.block), [], [], [], [], [])
   end
   gtb-src("x = 2") is []
   gtb-src("datatype Foo: | foo with constructor(self): self end end") is [pair(nmty("Foo"), typeNominal(anonType(moreRecord([]))))]
@@ -1140,7 +1173,7 @@ fun is-inferred-functions(ast :: A.Expr) -> TCST<List<Pair<String, Type>>>:
 where:
   fun iif-src(src):
     stx = A.parse(src,"anonymous-file", { ["check"]: false}).pre-desugar
-    eval(is-inferred-functions(stx.block), [], [], [], default-type-env)
+    eval(is-inferred-functions(stx.block), [], [], [], [], default-type-env)
   end
   baseRec = moreRecord([])
   iif-src("fun f(): 10 where: f() is 10 end") is
@@ -1385,60 +1418,60 @@ fun subtype(l :: Loc, _child :: Type, _parent :: Type) -> TCST<Bool>:
   subtype-int(true, _child, _parent)
 where:
   l = loc("", 0, 0)
-  eval(subtype(l, anyType, anyType), [], [], [], default-type-env) is true
+  eval(subtype(l, anyType, anyType), [], [], [], [], default-type-env) is true
   numType = nmty("Number")
-  eval(subtype(l, numType, anyType), [], [], [], default-type-env) is true
-  eval(subtype(l, anyType, numType), [], [], [], default-type-env) is false
+  eval(subtype(l, numType, anyType), [], [], [], [], default-type-env) is true
+  eval(subtype(l, anyType, numType), [], [], [], [], default-type-env) is false
 
-  eval(subtype(l, nmty("Any"), nmty("Any")), [], [], [], default-type-env) is true
-  eval(subtype(l, numType, nmty("Any")), [], [], [], default-type-env) is true
-  eval(subtype(l, nmty("Any"), numType), [], [], [], default-type-env) is false
+  eval(subtype(l, nmty("Any"), nmty("Any")), [], [], [], [], default-type-env) is true
+  eval(subtype(l, numType, nmty("Any")), [], [], [], [], default-type-env) is true
+  eval(subtype(l, nmty("Any"), numType), [], [], [], [], default-type-env) is false
 
   fun recType(flds): anonType(normalRecord(flds)) end
 
-  eval(subtype(l, recType([pair("foo", anyType)]), anyType), [], [], [], default-type-env) is true
-  eval(subtype(l, recType([pair("foo", anyType)]), recType([pair("foo", anyType)])), [], [], [], default-type-env) is true
-  eval(subtype(l, recType([pair("foo", anyType)]), recType([pair("foo", numType)])), [], [], [], default-type-env) is false
-  eval(subtype(l, recType([pair("foo", numType)]), recType([pair("foo", anyType)])), [], [], [], default-type-env) is true
-  eval(subtype(l, recType([]), recType([pair("foo", numType)])), [], [], [], default-type-env) is false
+  eval(subtype(l, recType([pair("foo", anyType)]), anyType), [], [], [], [], default-type-env) is true
+  eval(subtype(l, recType([pair("foo", anyType)]), recType([pair("foo", anyType)])), [], [], [], [], default-type-env) is true
+  eval(subtype(l, recType([pair("foo", anyType)]), recType([pair("foo", numType)])), [], [], [], [], default-type-env) is false
+  eval(subtype(l, recType([pair("foo", numType)]), recType([pair("foo", anyType)])), [], [], [], [], default-type-env) is true
+  eval(subtype(l, recType([]), recType([pair("foo", numType)])), [], [], [], [], default-type-env) is false
   eval(subtype(l, recType([pair("foo", numType), pair("bar", anyType)]),
-      recType([pair("foo", anyType)])), [], [], [], default-type-env) is true
+      recType([pair("foo", anyType)])), [], [], [], [], default-type-env) is true
 
   eval(subtype(l, arrowType([], dynType, moreRecord([])),
-      arrowType([dynType], dynType, moreRecord([]))), [], [], [], default-type-env) is false
+      arrowType([dynType], dynType, moreRecord([]))), [], [], [], [], default-type-env) is false
   eval(subtype(l, arrowType([numType], dynType, moreRecord([])),
-      arrowType([anyType], dynType, moreRecord([]))), [], [], [], default-type-env) is true
+      arrowType([anyType], dynType, moreRecord([]))), [], [], [], [], default-type-env) is true
   eval(subtype(l, arrowType([anyType], dynType, moreRecord([])),
-      arrowType([numType], dynType, moreRecord([]))), [], [], [], default-type-env) is false
+      arrowType([numType], dynType, moreRecord([]))), [], [], [], [], default-type-env) is false
   eval(subtype(l, arrowType([anyType], dynType, moreRecord([])),
-      arrowType([anyType], dynType, moreRecord([]))), [], [], [], default-type-env) is true
+      arrowType([anyType], dynType, moreRecord([]))), [], [], [], [], default-type-env) is true
   eval(subtype(l, arrowType([anyType], anyType, moreRecord([])),
-      arrowType([anyType], numType, moreRecord([]))), [], [], [], default-type-env) is true
+      arrowType([anyType], numType, moreRecord([]))), [], [], [], [], default-type-env) is true
   eval(subtype(l, arrowType([anyType], numType, moreRecord([])),
-      arrowType([anyType], anyType, moreRecord([]))), [], [], [], default-type-env) is false
+      arrowType([anyType], anyType, moreRecord([]))), [], [], [], [], default-type-env) is false
 
   eval(subtype(l, methodType(dynType, [], dynType, moreRecord([])),
-      methodType(dynType, [dynType], dynType, moreRecord([]))), [], [], [], default-type-env) is false
+      methodType(dynType, [dynType], dynType, moreRecord([]))), [], [], [], [], default-type-env) is false
   eval(subtype(l, methodType(numType, [anyType], dynType, moreRecord([])),
-      methodType(anyType, [anyType], dynType, moreRecord([]))), [], [], [], default-type-env) is true
+      methodType(anyType, [anyType], dynType, moreRecord([]))), [], [], [], [], default-type-env) is true
   eval(subtype(l, methodType(numType, [anyType], dynType, moreRecord([])),
-      methodType(numType, [numType], dynType, moreRecord([]))), [], [], [], default-type-env) is false
+      methodType(numType, [numType], dynType, moreRecord([]))), [], [], [], [], default-type-env) is false
   eval(subtype(l, methodType(anyType, [anyType], dynType, moreRecord([])),
-      methodType(anyType, [anyType], dynType, moreRecord([]))), [], [], [], default-type-env) is true
+      methodType(anyType, [anyType], dynType, moreRecord([]))), [], [], [], [], default-type-env) is true
   eval(subtype(l, methodType(numType, [anyType], anyType, moreRecord([])),
-      methodType(anyType, [anyType], numType, moreRecord([]))), [], [], [], default-type-env) is true
+      methodType(anyType, [anyType], numType, moreRecord([]))), [], [], [], [], default-type-env) is true
   eval(subtype(l, methodType(numType, [anyType], numType, moreRecord([])),
-      methodType(anyType, [anyType], anyType, moreRecord([]))), [], [], [], default-type-env) is false
+      methodType(anyType, [anyType], anyType, moreRecord([]))), [], [], [], [], default-type-env) is false
 
-  eval(subtype(l, anyType, nmty("Any")), [], [], [], default-type-env) is true
+  eval(subtype(l, anyType, nmty("Any")), [], [], [], [], default-type-env) is true
 
-  eval(subtype(l, appty("Foo", []), nmty("Any")), [], [], [], default-type-env)
+  eval(subtype(l, appty("Foo", []), nmty("Any")), [], [], [], [], default-type-env)
   is true
-  eval(subtype(l, appty("Foo", []), bigLamType(["T"], appType("Foo", []))), [], [], [], default-type-env)
+  eval(subtype(l, appty("Foo", []), bigLamType(["T"], appType("Foo", []))), [], [], [], [], default-type-env)
   is false
-  eval(subtype(l, appty("Foo", ["String"]), appty("Foo", ["Any"])), [], [], [], default-type-env)
+  eval(subtype(l, appty("Foo", ["String"]), appty("Foo", ["Any"])), [], [], [], [], default-type-env)
   is true
-  eval(subtype(l, bigLamType(["T"], appty("Option", ["T"])), bigLamType(["T"], appty("Option", ["T"]))), [], [], [], default-type-env)
+  eval(subtype(l, bigLamType(["T"], appty("Option", ["T"])), bigLamType(["T"], appty("Option", ["T"]))), [], [], [], [], default-type-env)
   is true
 
 end
@@ -1616,14 +1649,14 @@ fun tc-main(p, s):
   stx = s^A.parse(p, { ["check"]: false})
   # NOTE(dbp 2013-11-03): This is sort of crummy. Need to get bindings first, for use
   # with inferring functions, but then will do this again when we start type checking...
-  bindings = eval(get-bindings(stx.with-types.block), [], [], env, default-type-env)
-  iifs = eval(is-inferred-functions(stx.pre-desugar.block), [], [], bindings + env, default-type-env)
-  run(tc-prog(stx.with-types), [], iifs, env, default-type-env)
+  bindings = eval(get-bindings(stx.with-types.block), [], [], [], env, default-type-env)
+  iifs = eval(is-inferred-functions(stx.pre-desugar.block), [], [], [], bindings + env, default-type-env)
+  run(tc-prog(stx.with-types), [], [], iifs, env, default-type-env)
 end
 
 fun tc-file(p, s):
   res = tc-main(p,s)
-  {errors: res.errors}
+  {errors: res.errors, warnings: res.warnings}
 end
 
 fun tc-report(p, s):
@@ -1701,15 +1734,15 @@ fun tc-branches(bs :: List<TCST<Type>>) -> TCST<TCBranchRes>:
       end
     end)
 where:
-  eval(tc-branches([return(dynType), return(anyType)]), [], [], [], default-type-env)
+  eval(tc-branches([return(dynType), return(anyType)]), [], [], [], [], default-type-env)
     is branchCompatible(anyType)
-  eval(tc-branches([return(dynType), return(anyType),return(nmty("Bool"))]), [], [], [], default-type-env)
+  eval(tc-branches([return(dynType), return(anyType),return(nmty("Bool"))]), [], [], [], [], default-type-env)
     is branchIncompatible([anyType, nmty("Bool")])
   eval(tc-branches([return(dynType), return(bigLamType(["T"], appty("Option", ["T"]))),
-        return(appty("Option", ["Bool"])), return(appty("Option", ["String"]))]), [], [], [], default-type-env)
+        return(appty("Option", ["Bool"])), return(appty("Option", ["String"]))]), [], [], [], [], default-type-env)
     is branchIncompatible([appty("Option", ["Bool"]), appty("Option", ["String"])])
   eval(tc-branches([return(dynType), return(bigLamType(["T"], appty("Option", ["T"]))),
-        return(bigLamType(["U"], appty("Option", ["U"]))), return(appty("Option", ["String"]))]), [], [], [], default-type-env)
+        return(bigLamType(["U"], appty("Option", ["U"]))), return(appty("Option", ["String"]))]), [], [], [], [], default-type-env)
     is branchCompatible(appty("Option", ["String"]))
 
 end
