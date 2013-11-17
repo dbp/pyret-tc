@@ -1298,7 +1298,9 @@ fun is-inferred-functions(ast :: A.Expr) -> TCST<List<Pair<String, Type>>>:
             newvar = tyvars.get(varcount)
             varcount := varcount + 1
             updated = unzip2(replace-pairwise(newvar, mm-ts.a, existing, mm-ts.b, matching))
-            link(updated.a.first, match-pairs(updated.a.rest, updated.b.rest))
+            # NOTE(dbp 2013-11-16): This is generative. What is shrinking is the number of
+            # mismatches, enforced by the (hopeful) correctness of mismatch/replace-pairwise.
+            match-pairs(updated.a, updated.b)
         end
     end
   end
