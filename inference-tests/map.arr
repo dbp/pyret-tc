@@ -6,13 +6,18 @@ where:
   add1(1) is 2
 end
 
+fun bool2string(b):
+  tostring(b)
+where:
+  bool2string(true) is "true"
+end
+
 fun map(fn, l):
   cases(List) l:
     | empty => empty
     | link(f, r) => link(fn(f), map(fn, r))
   end
 where:
-  map(tostring, [1,2,3]) is ["1", "2", "3"]
   map(add1, [1]) is [2]
-  map(tostring, [true]) is ["true"]
+  map(bool2string, [true]) is ["true"]
 end

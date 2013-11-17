@@ -1312,7 +1312,14 @@ fun is-inferred-functions(ast :: A.Expr) -> TCST<List<Pair<String, Type>>>:
     end
   end
   cases(A.Expr) ast:
-    | s_block(l, stmts) => sequence(stmts.map(is-inferred-functions))^bind(fun(fs): return(concat(fs)) end)
+    | s_block(l, stmts) =>
+      get-iifs()^bind(fun(iifs):
+          for foldm(fns from iifs, stmt from stmts):
+            add-bindings(fns, is-inferred-functions(stmt)^bind(fun(fs):
+                  return(fns + fs)
+                end))
+          end
+        end)
     | s_fun(l, name, params, args, ann, doc, body, ck) =>
       find-is-pairs(name, ck)^bind(fun(pairs):
           if pairs <> []:
