@@ -21,6 +21,103 @@
 #                                                                              #
 ################################################################################
 
+################################################################################
+#                                                                              #
+# Main Outline / Important Algorithms.                                         #
+#                                                                              #
+# The type checker is written with the State Monad. There are about 150 lines  #
+# defining this (as Pyret doesn't have monads). If you aren't familiar with    #
+# how it works, consult any of various tutorials (not on monads in general,    #
+# just the state monad). The reason for this is that we have many pieces of    #
+# state that we want to thread, some that we want to be able to modify locally,#
+# and sometimes want to discard the accumulated state. Doing this with mutation#
+# is possible, but makes it harder to test (as any test has to be aware of when#
+# it is running, so it doesn't disturb existing state), and doesn't add much.  #
+#                                                                              #
+# Types:                                                                       #
+# The type system has standard base types (Number, Bool, String, etc), a top   #
+# type (Any), record types ({field :: Type,..}), and a dynamic type (Dyn). New #
+# data types with variants are created with datatype, and any type can be      #
+# parametrized by forall type variables (note that surface Pyret is more       #
+# restrictive, so only datatype and functions definitions should have these.)  #
+# There is subtyping for records (width and depth), and Any is the supertype   #
+# of everything. Dyn is special - it can be super or subtype, and is sufficient#
+# for replacement with any other type (this may generate warnings, but not     #
+# errors). When it hits an error, the type checker keeps going, attributing    #
+# the type of the erroneous expression as Dyn.                                 #
+#                                                                              #
+# Phases:                                                                      #
+# There are three main conceptual passes to the type checker. They are:        #
+#  - binding extraction.
+#  - is inference
+#  - type checking
+#
+# Binding Extraction:
+# This is a block-level operation, which is a fold through the statements,
+# collecting bindings and types as it goes. For functions, it takes the
+# annotations specified in syntax as the type, for all other let bindings, it
+# takes the annotation as the type if it exists, and if not, it type checks the
+# value and uses that as the annotation, binding the identifier with type Dyn
+# (so recursive definitions work). For datatypes new types are added to the
+# type environment, and constructors are added to the binding environment.
+#
+# Is Inference:
+# We infer types of functions based on 'where' blocks - anywhere we see
+# foo(a,...) is z, we try to figure out types for a... and z, and then use that
+# to figure out the type of foo. This is done so that later definitions can
+# benefit from inference on earlier ones. The algorithm for generalizing to
+# parametric types is the following:
+# Given a pair of lists of types (the args and return), we look at the first
+# two.  If any part of them does not match (so Number and String, but also
+# List<Number> and List<String>), we take that pair, construct a new type
+# variable, and replace the two wherever they appear matched through the rest
+# of the list of types. We then look for more mismatches and repeat until there
+# are none. Now we move to the next pair of types. This is the procedure to
+# generalize two types for the function - we can use that and the next
+# potential type and repeat.  As a concrete example, consider the following
+# three tests:
+# foo(10, 20) is 20
+# foo('foo', 'bar') is 'bar'
+# foo(30, true) is true
+# The algorithm would proceed as follows:
+# 10 and 'foo' don't match, and have types Number and String. So create new
+# type variable T and replace pairwise, yielding:
+# T, T -> T
+# T, T -> T
+# We now find no mismatches through the entire list, so this is our candidate
+# type.  Now we start with the next signature, and work off of this pair:
+# T, T -> T
+# Number, Bool -> Bool
+# The first don't match, so we create a new type variable U and replace
+# pairwise, to get:
+# U, T -> T
+# U, Bool -> Bool
+# Now the first argument matches, so work on the second. It doesn't match, so
+# create a new type variable V and replace pairwise:
+# U, V -> V
+# U, V -> V
+# And now we've (successfully) inferred a proper type for this function.
+#
+# Type Checking: This is mostly straightforward typechecking, with the usual
+# co/contravariance for subtyping with functions, making sure all branches of
+# if/cases have the same type, etc.  The only thing that is a bit tricky is
+# inferring instantiations for type variables.  This comes up in two ways: in
+# the application of polymorphic functions, we need to figure out any type
+# variables in the return type, so for example: fun<A> head(List<A>) -> A, when
+# applied to a List<Number>, we need to figure out that A is Number in this
+# application. The other place is in datatype. The straightforward cases is the
+# same as with functions - figuring out the type of a constructed type, like
+# link(10, list-of-numbers) :: List<Number>. The harder case is when the
+# variant does not actually mention the type variable, for example, empty. We
+# do this by normal type inference, in the local contexts where it is needed
+# (so the context of empty should allow us to instantiate the A type
+# variable). This also occurs with cases, which is almost always written
+# as cases(List), but List is a type function, not a type, so we need to infer
+# what the type of the parameter A should be.
+#
+################################################################################
+
+
 provide {
   main: tc-main,
   format-type: fmty
