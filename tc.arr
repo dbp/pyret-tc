@@ -1180,8 +1180,18 @@ fun is-inferred-functions(ast :: A.Expr) -> TCST<List<Pair<String, Type>>>:
               cases(A.Expr) fn:
                 | s_id(l2, fname) =>
                   if fname == name:
-                    tc(r)^bind(fun(rightty):
-                        sequence(args.map(tc))^bind(fun(argsty):
+                    fun instantiate-any(t):
+                      doc: "parametric types are instantiated w Any, as we can't deal with them uninstantiated"
+                      cases(Type) t:
+                        | bigLamType(params, _t) =>
+                          return(for fold(type from _t, p from params):
+                              replace(nmty(p), anyType, type)
+                            end)
+                        | else => return(t)
+                      end
+                    end
+                    tc(r)^bind(instantiate-any)^bind(fun(rightty):
+                        sequence(args.map(fun(a): tc(a)^bind(instantiate-any) end))^bind(fun(argsty):
                             return([arrowType(argsty, rightty, moreRecord([]))])
                           end)
                       end)
