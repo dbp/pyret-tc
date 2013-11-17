@@ -178,8 +178,8 @@ end
 # NOTE(dbp 2013-11-11): This silliness is to get the things that are printed out on
 # failing tests to be friendly.
 data ErrWarnPair:
-  | errPair(msg, ers)
-  | warnPair(msg, ers)
+  | errPair(file, msg, ers)
+  | warnPair(file, msg, ers)
 end
 
 fun ew-contains(ew):
@@ -187,8 +187,8 @@ fun ew-contains(ew):
 end
 
 data NoErrsWarns:
-  | noErrorsIn(ers)
-  | noWarnsIn(ers)
+  | noErrorsIn(file, ers)
+  | noWarnsIn(file, ers)
 end
 
 fun is-blank(noe):
@@ -208,19 +208,19 @@ check:
         cases(EWConfig) extract-errs-warns(path, code):
           | errsWarns(errors, warns) =>
             for each(err from errors):
-              errPair(err, fmtd-errs) satisfies ew-contains
+              errPair(path, err, fmtd-errs) satisfies ew-contains
             end
             for each(warn from warns):
-              warnPair(warn, fmtd-warns) satisfies ew-contains
+              warnPair(path, warn, fmtd-warns) satisfies ew-contains
             end
           | noErrs(warns) =>
-            noErrorsIn(fmtd-errs) satisfies is-blank
+            noErrorsIn(path, fmtd-errs) satisfies is-blank
             for each(warn from warns):
-              warnPair(warn, fmtd-warns) satisfies ew-contains
+              warnPair(path, warn, fmtd-warns) satisfies ew-contains
             end
           | noErrsWarns =>
-            noErrorsIn(fmtd-errs) satisfies is-blank
-            noWarnsIn(fmtd-warns) satisfies is-blank
+            noErrorsIn(path, fmtd-errs) satisfies is-blank
+            noWarnsIn(path, fmtd-warns) satisfies is-blank
         end
 
       end

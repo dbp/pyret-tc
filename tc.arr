@@ -107,10 +107,18 @@ sharing:
   end
 end
 
+data TypeInferred:
+  | typeInferred
+  | typeNotInferred
+end
+
 data TypeBinding:
   | typeAlias(type :: Type)
   | typeNominal(type :: Type)
 end
+
+# used in testing
+dummy-loc = loc("dummy-file", -1, -1)
 
 #####################################################################
 #                                                                   #
@@ -462,7 +470,7 @@ where:
   [23, 123, 1023].map(fun(n): ordinalize(n) is tostring(n) + "rd" end)
 end
 
-fun<A> zip2(_l1 :: List<A>, _l2 :: List<B>) -> List<Pair<A,B>>:
+fun<A,B> zip2(_l1 :: List<A>, _l2 :: List<B>) -> List<Pair<A,B>>:
   doc: "Will fail if the second list is shorter than first."
   fun zip2h(l1, l2):
     cases(List<A>) l1:
@@ -475,6 +483,30 @@ fun<A> zip2(_l1 :: List<A>, _l2 :: List<B>) -> List<Pair<A,B>>:
   else:
     zip2h(_l1, _l2)
   end
+end
+
+fun<A,B> unzip2(l :: List<Pair<A,B>>) -> Pair<List<A>, List<B>>:
+  cases(List) l:
+    | empty => pair([],[])
+    | link(f, r) =>
+      rp = unzip2(r)
+      pair(link(f.a, rp.a), link(f.b, rp.b))
+  end
+where:
+  unzip2([]) is pair([],[])
+  unzip2([pair(1,2)]) is pair([1], [2])
+  unzip2([pair(1,2), pair(3,4)]) is pair([1,3], [2,4])
+end
+
+fun<A> list-to-option(l :: List<A>) -> Option<A>:
+  cases(List) l:
+    | empty => none
+    | link(f, _) => some(f)
+  end
+where:
+  list-to-option([]) is none
+  list-to-option([1,2]) is some(1)
+  list-to-option([3]) is some(3)
 end
 
 
@@ -496,6 +528,24 @@ fun params-wrap(ps :: List<String>, t :: Type):
   else:
     bigLamType(ps, t)
   end
+end
+
+fun tyshallowequals(t1 :: Type, t2 :: Type) -> Bool:
+  doc: "equality only in tags"
+  cases(Type) t1:
+    | dynType => is-dynType(t2)
+    | anyType => is-anyType(t2)
+    | nameType(_) => is-nameType(t2)
+    | anonType(_) => is-anonType(t2)
+    | arrowType(_,_,_) => is-arrowType(t2)
+    | methodType(_,_,_,_) => is-methodType(t2)
+    | appType(_,_) => is-appType(t2)
+    | bigLamType(_,_) => is-bigLamType(t2)
+  end
+where:
+  tyshallowequals(dynType, dynType) is true
+  tyshallowequals(nmty("A"), nmty("B")) is true
+  tyshallowequals(nmty("A"), dynType) is false
 end
 
 fun tycompat(t1 :: Type, t2 :: Type) -> Bool:
@@ -607,9 +657,9 @@ fun appears(v :: String, t :: Type) -> Bool:
   end
 end
 
-fun replace(v :: String, nt :: Type, t :: Type) -> Type:
-  doc: "replace any occurrence of nameType(n) with nt in t"
-  fun rec-replace(_v :: String, _nt :: Type, r :: RecordType) -> RecordType:
+fun replace(v :: Type, nt :: Type, t :: Type) -> Type:
+  doc: "replace any occurrence of v with nt in t"
+  fun rec-replace(_v :: Type, _nt :: Type, r :: RecordType) -> RecordType:
     cases(RecordType) r:
       | normalRecord(fields) =>
         normalRecord(fields.map(fun(p): pair(p.a, replace(_v,_nt,p.b)) end))
@@ -618,7 +668,7 @@ fun replace(v :: String, nt :: Type, t :: Type) -> Type:
     end
   end
   cases(Type) t:
-    | nameType(name) => if name == v: nt else: t end
+    | nameType(name) => if t == v: nt else: t end
     | anonType(rec) => anonType(rec-replace(v, nt, rec))
     | arrowType(args, ret, rec) =>
       arrowType(args.map(replace(v,nt,_)), replace(v,nt,ret), rec-replace(v,nt, rec))
@@ -627,7 +677,7 @@ fun replace(v :: String, nt :: Type, t :: Type) -> Type:
     | appType(name, args) =>
       appType(name, args.map(replace(v,nt,_)))
     | bigLamType(params, type) =>
-      if params.member(v): t
+      if is-nameType(v) and params.member(v.name): t
       else: bigLamType(params, replace(v, nt, type))
       end
     | dynType => t
@@ -675,10 +725,10 @@ fun tysolve(vars :: List<String>, _eqs :: List<Pair<Type, Type>>, tys :: List<Ty
       # as long as we don't go deep (2 or 3 max), the exponential nature of this shouldn't matter.
       max-len = vars.map(_.length()).foldr(fun(x, m): if x > m: x else: m end end, 0)
       t1 = for fold(acc from _t1, r from to-rename):
-        replace(r, nmty("_".repeat(max-len) + r), acc)
+        replace(nmty(r), nmty("_".repeat(max-len) + r), acc)
       end
       t2 = for fold(acc from _t2, r from to-rename):
-        replace(r, nmty("_".repeat(max-len) + r), acc)
+        replace(nmty(r), nmty("_".repeat(max-len) + r), acc)
       end
       params = to-rename.map("_".repeat(max-len) + _) + not-to-rename
       rel-vars = vars.filter(fun(v): appears(v, t1) or appears(v, t2) end)
@@ -819,7 +869,7 @@ fun tysolve(vars :: List<String>, _eqs :: List<Pair<Type, Type>>, tys :: List<Ty
                             raise(nothing)
                           end
                         else:
-                          pair(r.a, replace(a, b, r.b))
+                          pair(r.a, replace(nmty(a), b, r.b))
                         end
                       end)))
               end
@@ -832,11 +882,11 @@ fun tysolve(vars :: List<String>, _eqs :: List<Pair<Type, Type>>, tys :: List<Ty
 
   fun conreplace(sols :: List<Pair<String,Type>>, _tys :: List<Type>) -> TySolveRes:
     replaced = for fold(acc from _tys, sol from sols):
-      acc.map(replace(sol.a, sol.b, _))
+      acc.map(replace(nmty(sol.a), sol.b, _))
     end
     if list.any(fun(x): x end, replaced.map(fun(r): list.any(fun(x): x end, vars.map(appears(_, r))) end)):
       someSolved(for fold(acc from replaced, v from vars):
-          acc.map(replace(v, dynType, _))
+          acc.map(replace(nmty(v), dynType, _))
         end)
     else:
       allSolved(replaced)
@@ -941,7 +991,7 @@ fun rename-params(_params, types-appear, types-rename):
       | link(f, r) =>
         if list.any(fun(x): x end, types-appear.map(appears(f, _))):
           np = fvs.get(fv-index)
-          h(r, fv-index + 1, new-params + [np], new-types.map(replace(f, nmty(np), _)))
+          h(r, fv-index + 1, new-params + [np], new-types.map(replace(nmty(f), nmty(np), _)))
         else:
           h(r, fv-index, new-params + [f], new-types)
         end
@@ -1048,7 +1098,6 @@ where:
   # like this, as it seems fragile, but I don't think we have a way of parsing
   # fragments, and parsing larger programs and extracting the parts out doesn't
   # seem any less fragile
-  dummy-loc = loc("dummy-file", -1, -1)
   footy = nmty("Foo")
   boolty = nmty("Bool")
   strty = nmty("String")
@@ -1149,13 +1198,135 @@ fun is-inferred-functions(ast :: A.Expr) -> TCST<List<Pair<String, Type>>>:
       | else => return([])
     end
   end
+  # TODO(dbp 2013-11-15): Handle arity mismatch somewhere...
+
+  # this is a hack - we want a pool of free variables... Assuming enough of these
+  # will be free.
+  var tyvars = [] # will be set once we can figure out what are available.
+  var varcount = 0
+  # TODO(dbp 2013-11-15): Return mismatch if records are not compatible (right now it
+  # will either blow up or silently work.)
+  fun rec-mismatch(r1 :: RecordType, r2 :: RecordType) -> List<Pair<Type, Type>>:
+    list-to-option(
+      r1.fields.map(fun(f): mismatch(f.b, map-get(r2, f.a).value) end).filter(is-some).map(_.value)
+      )
+  end
+  fun mismatch(t1 :: Type, t2 :: Type) -> Option<Pair<Type, Type>>:
+    doc: "finds the first mismatch between types"
+    cases(Type) t1:
+      | nameType(name) => if t1 == t2: none else: some(pair(t1, t2)) end
+        | anonType(rec) => if is-anonType(t2): rec-mismatch(rec, t2.rec) else: [pair(t1, t2)] end
+      | arrowType(args, ret, rec) =>
+        if is-arrowType(t2):
+          list-to-option((map2(mismatch, args, t2.args) + [mismatch(ret, t2.ret)]).filter(is-some).map(_.value))
+        else: some(pair(t1, t2)) end
+      | methodType(self, args, ret, rec) =>
+        if is-methodType(t2):
+          list-to-option(([mismatch(self, t2.self)] + map2(mismatch, args, t2.args) + [mismatch(ret, t2.ret)]).filter(is-some).map(_.value))
+        else: some(pair(t1, t2)) end
+      | appType(name, args) =>
+        if is-appType(t2) and (name == t2.name): list-to-option(map2(mismatch, args, t2.args).filter(is-some).map(_.value))
+        else: some(pair(t1, t2)) end
+      | bigLamType(params, type) =>
+        # TODO(dbp 2013-11-15): Figure out what better we can do in this case.
+        if is-bigLamType(t2): mismatch(type, t2.type)
+        else: some(pair(t1, t2)) end
+        # TODO(dbp 2013-11-15): Not sure if this is right. What does dynType mismatch with?
+      | dynType => none
+      | anyType => if is-anyType(t2): none else: some(pair(anyType, t2)) end
+    end
+  end
+  fun structural-replace(tyvar :: String, o1 :: Type, t1 :: Type, o2 :: Type, t2 :: Type) -> Pair<Type, Type>:
+    doc: "this function stops replacing when it finds t1 <> t2 where t1 and t2 are not o1 and o2 respectively. This is because this is the part of the greedy algorithm that starts with mismatch, which finds the first mismatch."
+    sr = structural-replace(tyvar, o1, _, o2, _)
+    fun rec-struc-replace(r1, r2):
+      fs = r1.fields.map(_.a)
+      unzip2(fs.map(fun(f):
+          ns = sr(f.b, map-get(r2, f.a).value)
+          pair(pair(f.a, ns.a), pair(f.a, ns.b))
+        end))
+    end
+    if (t1 == o1) and (t2 == o2):
+      pair(nmty(tyvar), nmty(tyvar))
+    else if not tyshallowequals(t1, t2):
+      pair(t1, t2)
+    else:
+      cases(Type) t1:
+        | dynType => pair(t1, t2)
+        | anyType => pair(t1, t2)
+        | nameType(name) => pair(t1, t2)
+        | anonType(record) =>
+          s = rec-struc-replace(record, t2.record)
+          pair(anonType(s.a), anonType(s.b))
+        | arrowType(args, ret, record) =>
+          ars = unzip2(map2(sr, args, t2.args))
+          r = sr(ret, t2.ret)
+          rec = rec-struc-replace(record, t2.record)
+          pair(arrowType(ars.a, r.a, moreRecord(rec.a)), arrowType(ars.b, r.b, moreRecord(rec.b)))
+        | methodType(self, args, ret, record) =>
+          s = sr(self, t2.self)
+          ars = unzip2(map2(sr, args, t2.args))
+          r = sr(ret, t2.ret)
+          rec = rec-struc-replace(record, t2.record)
+          pair(methodType(s.a, ars.a, r.a, rec.a), methodType(s.b, ars.b, r.b, rec.b))
+        | appType(name, args) =>
+          aps = unzip2(map2(sr, args, t2.args))
+          pair(appType(name, aps.a), appType(t2.name, aps.b))
+        | bigLamType(params, type) =>
+          # TODO(dbp 2013-11-16): Don't allow shadowing to mess this up.
+          p = sr(type, t2.type)
+          pair(bigLamType(params, p.a), bigLamType(t2.params, p.b))
+      end
+    end
+  end
+  fun replace-pairwise(tyvar :: String, o1 :: Type, ty1 :: List<Type>, o2 :: Type, ty2 :: List<Type>) -> List<Pair<Type, Type>>:
+    cases(List) ty1:
+      | empty => empty
+      | link(f1, r1) =>
+        f2 = ty2.first
+        r2 = ty2.rest
+        link(structural-replace(tyvar, o1, f1, o2, f2), replace-pairwise(tyvar, o1, r1, o2, r2))
+    end
+  end
+  fun match-pairs(existing :: List<Type>, matching :: List<Type>) -> List<Type>:
+    cases(List) existing:
+      | empty => existing
+      | link(f, r) =>
+        cases(Option) mismatch(f, matching.first):
+          | none => link(f, match-pairs(r, matching.rest))
+          | some(mm-ts) =>
+            newvar = tyvars.get(varcount)
+            varcount := varcount + 1
+            updated = unzip2(replace-pairwise(newvar, mm-ts.a, existing, mm-ts.b, matching))
+            link(updated.a.first, match-pairs(updated.a.rest, updated.b.rest))
+        end
+    end
+  end
+  fun compute-type(tests :: List<List<Type>>, type :: List<Type>) -> List<Type>:
+    cases(List) tests:
+      | empty => type
+      | link(f, r) =>
+        compute-type(r, match-pairs(type, f))
+    end
+  end
   cases(A.Expr) ast:
     | s_block(l, stmts) => sequence(stmts.map(is-inferred-functions))^bind(fun(fs): return(concat(fs)) end)
     | s_fun(l, name, params, args, ann, doc, body, ck) =>
       find-is-pairs(name, ck)^bind(fun(pairs):
-          # NOTE(dbp 2013-10-21): this should do an least upper bound.
           if pairs <> []:
-            return([pair(name, pairs.first)])
+            fun a2l(t) -> List<Type>: t.args + [t.ret] end
+            tylists = pairs.map(a2l)
+            tyvars := builtins.string-to-list("TUVWABCDEFGHIJKLMNOPQRSXYZ").filter(
+              fun(v): not list.any(fun(x): x end, tylists.map(fun(lst):
+                    list.any(fun(x): x end, lst.map(appears(v,_)))
+                    end))
+              end)
+            ct = compute-type(tylists.rest, tylists.first)
+            typarams = tyvars.take(varcount).filter(fun(v):
+                list.any(fun(x): x end, ct.map(appears(v,_)))
+              end)
+            type = params-wrap(typarams, arrowType(ct.take(ct.length() - 1), ct.last(), moreRecord([])))
+            return([pair(name, type)])
           else:
             return([])
           end
@@ -1165,24 +1336,41 @@ fun is-inferred-functions(ast :: A.Expr) -> TCST<List<Pair<String, Type>>>:
 where:
   fun iif-src(src):
     stx = A.parse(src,"anonymous-file", { ["check"]: false}).pre-desugar
-    eval(is-inferred-functions(stx.block), [], [], [], [], default-type-env)
+    eval(is-inferred-functions(stx.block), [], [], [], default-env, default-type-env)
   end
   baseRec = moreRecord([])
-  iif-src("fun f(): 10 where: f() is 10 end") is
-  [pair("f", arrowType([], nmty("Number"), baseRec))]
-  iif-src("fun f(x): 10 where: f('foo') is true end") is
-    [pair("f", arrowType([nmty("String")], nmty("Bool"), baseRec))]
-  iif-src("fun f(x): 10 where: f('foo') is true end
-    fun g(): 10 where: g() is 10 end") is
-    [pair("f", arrowType([nmty("String")], nmty("Bool"), baseRec)),
-    pair("g", arrowType([], nmty("Number"), baseRec))]
-  iif-src("fun f(x): 10 where: f('foo') is true end
-    fun g(): 10 where: f() is 10 end") is
-  [pair("f", arrowType([nmty("String")], nmty("Bool"), baseRec))]
-  iif-src("fun f(x): add1(x) where: f('Fo') is 10 end") is
-  [pair("f", arrowType([nmty("String")], nmty("Number"), baseRec))]
-end
+  # iif-src("fun f(): 10 where: f() is 10 end") is
+  # [pair("f", arrowType([], nmty("Number"), baseRec))]
+  # iif-src("fun f(x): 10 where: f('foo') is true end") is
+  #   [pair("f", arrowType([nmty("String")], nmty("Bool"), baseRec))]
+  # iif-src("fun f(x): 10 where: f('foo') is true end
+  #   fun g(): 10 where: g() is 10 end") is
+  #   [pair("f", arrowType([nmty("String")], nmty("Bool"), baseRec)),
+  #   pair("g", arrowType([], nmty("Number"), baseRec))]
+  # iif-src("fun f(x): 10 where: f('foo') is true end
+  #   fun g(): 10 where: f() is 10 end") is
+  # [pair("f", arrowType([nmty("String")], nmty("Bool"), baseRec))]
+  # iif-src("fun f(x): add1(x) where: f('Fo') is 10 end") is
+  # [pair("f", arrowType([nmty("String")], nmty("Number"), baseRec))]
 
+  # iif-src("fun f(x): x where: f(10) is 10 f(true) is true end") is
+  # [pair("f", bigLamType(["T"], arrowType([nmty("T")], nmty("T"), baseRec)))]
+
+  # iif-src("fun f(x, y): x where: f(10, 10) is 10 f(true, false) is true end") is
+  # [pair("f", bigLamType(["T"], arrowType([nmty("T"), nmty("T")], nmty("T"), baseRec)))]
+
+  # iif-src("fun f(x, y): x where: f(10, 10) is 10 f(true, 10) is true end") is
+  # [pair("f", bigLamType(["T"], arrowType([nmty("T"), nmty("Number")], nmty("T"), baseRec)))]
+
+  # iif-src("fun f(x, y): x where: f(10, 10) is 10 f(true, 10) is true f('foo', 'bar') is 'foo' end") is
+  # [pair("f", bigLamType(["U", "V"], arrowType([nmty("U"), nmty("V")], nmty("U"), baseRec)))]
+
+  # iif-src("fun f(x, y, c): x where: f(10, true, 10) is 10 f(true, false, 10) is true f('foo', true, 'bar') is 'foo' end") is
+  # [pair("f", bigLamType(["U", "V"], arrowType([nmty("U"), nmty("Bool"), nmty("V")], nmty("U"), baseRec)))]
+
+  iif-src("fun f(x): x.first where: f([10]) is 10 f(['foo']) is 'foo' end") is
+  [pair("f", bigLamType(["T"], arrowType([appty("List", ["T"])], nmty("T"), baseRec)))]
+end
 
 ################################################################################
 # Subtyping.                                                                   #
@@ -1603,47 +1791,48 @@ default-type-env = [
   pair(nameType("Nothing"), typeNominal(anonType(normalRecord([]))))
 ]
 
+default-env = [
+  pair("list", anonType(
+      moreRecord([
+          pair("map", bigLamType(["U", "T"], arrowType([arrowType([nmty("T")], nmty("U"), moreRecord([])), appty("List", ["T"])], appty("List", ["U"]), moreRecord([])))),
+          pair("link", bigLamType(["T"], arrowType([nmty("T"), appty("List", ["T"])], appty("List", ["T"]), moreRecord([])))),
+          pair("empty", bigLamType(["T"], appType("List", [nmty("T")])))
+        ]))),
+  pair("builtins", anonType(moreRecord([
+          pair("equiv", arrowType([nmty("Any"), nmty("Any")], nmty("Bool"), moreRecord([])))
+        ]))),
+  pair("error", anonType(moreRecord([]))),
+  pair("link", bigLamType(["T"], arrowType([nmty("T"), appty("List", ["T"])], appty("List", ["T"]), moreRecord([])))),
+  pair("empty", bigLamType(["T"], appType("List", [nmty("T")]))),
+  pair("nothing", nmty("Nothing")),
+  pair("some", bigLamType(["T"], arrowType([nmty("T")], appty("Option", ["T"]), moreRecord([])))),
+  pair("none", bigLamType(["T"], appType("Option", [nmty("T")]))),
+  pair("true", nmty("Bool")),
+  pair("false", nmty("Bool")),
+  pair("print", arrowType([anyType], nmty("Nothing"), moreRecord([]))),
+  pair("tostring", arrowType([anyType], nmty("String"), moreRecord([]))),
+  pair("torepr", arrowType([anyType], nmty("String"), moreRecord([]))),
+  pair("fold", dynType),
+  pair("map", bigLamType(["U", "T"], arrowType([arrowType([nmty("T")], nmty("U"), moreRecord([])), appty("List", ["T"])], appty("List", ["U"]), moreRecord([])))),
+  pair("map2", dynType),
+  pair("raise", arrowType([anyType], dynType, moreRecord([]))),
+  pair("identical", arrowType([anyType, anyType], nmty("Bool"), moreRecord([]))),
+  pair("Racket", dynType),
+  pair("List", arrowType([anyType], nmty("Bool"), moreRecord([]))),
+  pair("String", arrowType([anyType], nmty("Bool"), moreRecord([]))),
+  pair("Function", arrowType([anyType], nmty("Bool"), moreRecord([]))),
+  pair("Bool", arrowType([anyType], nmty("Bool"), moreRecord([]))),
+  pair("Number", arrowType([anyType], nmty("Bool"), moreRecord([]))),
+  pair("Nothing", arrowType([anyType], nmty("Bool"), moreRecord([])))
+]
+
 fun tc-main(p, s):
-  env = [
-    pair("list", anonType(
-        moreRecord([
-            pair("map", bigLamType(["U", "T"], arrowType([arrowType([nmty("T")], nmty("U"), moreRecord([])), appty("List", ["T"])], appty("List", ["U"]), moreRecord([])))),
-            pair("link", bigLamType(["T"], arrowType([nmty("T"), appty("List", ["T"])], appty("List", ["T"]), moreRecord([])))),
-            pair("empty", bigLamType(["T"], appType("List", [nmty("T")])))
-          ]))),
-    pair("builtins", anonType(moreRecord([
-            pair("equiv", arrowType([nmty("Any"), nmty("Any")], nmty("Bool"), moreRecord([])))
-          ]))),
-    pair("error", anonType(moreRecord([]))),
-    pair("link", bigLamType(["T"], arrowType([nmty("T"), appty("List", ["T"])], appty("List", ["T"]), moreRecord([])))),
-    pair("empty", bigLamType(["T"], appType("List", [nmty("T")]))),
-    pair("nothing", nmty("Nothing")),
-    pair("some", bigLamType(["T"], arrowType([nmty("T")], appty("Option", ["T"]), moreRecord([])))),
-    pair("none", bigLamType(["T"], appType("Option", [nmty("T")]))),
-    pair("true", nmty("Bool")),
-    pair("false", nmty("Bool")),
-    pair("print", arrowType([anyType], nmty("Nothing"), moreRecord([]))),
-    pair("tostring", arrowType([anyType], nmty("String"), moreRecord([]))),
-    pair("torepr", arrowType([anyType], nmty("String"), moreRecord([]))),
-    pair("fold", dynType),
-    pair("map", bigLamType(["U", "T"], arrowType([arrowType([nmty("T")], nmty("U"), moreRecord([])), appty("List", ["T"])], appty("List", ["U"]), moreRecord([])))),
-    pair("map2", dynType),
-    pair("raise", arrowType([anyType], dynType, moreRecord([]))),
-    pair("identical", arrowType([anyType, anyType], nmty("Bool"), moreRecord([]))),
-    pair("Racket", dynType),
-    pair("List", arrowType([anyType], nmty("Bool"), moreRecord([]))),
-    pair("String", arrowType([anyType], nmty("Bool"), moreRecord([]))),
-    pair("Function", arrowType([anyType], nmty("Bool"), moreRecord([]))),
-    pair("Bool", arrowType([anyType], nmty("Bool"), moreRecord([]))),
-    pair("Number", arrowType([anyType], nmty("Bool"), moreRecord([]))),
-    pair("Nothing", arrowType([anyType], nmty("Bool"), moreRecord([])))
-  ]
   stx = s^A.parse(p, { ["check"]: false})
   # NOTE(dbp 2013-11-03): This is sort of crummy. Need to get bindings first, for use
   # with inferring functions, but then will do this again when we start type checking...
-  bindings = eval(get-bindings(stx.with-types.block), [], [], [], env, default-type-env)
-  iifs = eval(is-inferred-functions(stx.pre-desugar.block), [], [], [], bindings + env, default-type-env)
-  run(tc-prog(stx.with-types), [], [], iifs, env, default-type-env)
+  bindings = eval(get-bindings(stx.with-types.block), [], [], [], default-env, default-type-env)
+  iifs = eval(is-inferred-functions(stx.pre-desugar.block), [], [], [], bindings + default-env, default-type-env)
+  run(tc-prog(stx.with-types), [], [], iifs, default-env, default-type-env)
 end
 
 fun tc-prog(prog :: A.Program) -> TCST<Type>:
@@ -1750,42 +1939,22 @@ fun tc-let(l :: Loc, name :: A.Bind, val :: A.Expr) -> TCST<Type>:
               # involved we want to alter the error messages.
               cases(A.Expr) val:
                 | s_lam(l1, ps, args, ann, doc, body, ck) =>
-                  # NOTE(dbp 2013-10-21): Gah, mutation. This code should
-                  # be refactored.
-                  var inferred = false
-                  bind-params(ps,
-                    sequence(for map2(b from args, inf from fty.args):
-                        if A.is-a_blank(b.ann):
-                          when inf <> dynType:
-                            inferred := true
-                          end
-                          return(inf)
-                        else:
-                          get-type(b.ann)
-                        end
-                      end)^bind(fun(arg-tys):
-                        add-bindings(for map2(b from args, t from arg-tys):
-                            pair(b.id, t)
-                          end,
-                          tc(body)^bind(fun(body-ty):
-                              (if A.is-a_blank(ann): return(fty.ret) else: get-type(ann) end)^bind(fun(ret-ty):
-                                  subtype(l, body-ty, ret-ty)^bind(fun(st):
-                                      if st:
-                                        return(params-wrap(ps, arrowType(arg-tys, ret-ty, moreRecord([]))))
-                                      else:
-                                        add-error(l,
-                                          if inferred:
-                                            msg(errFunctionInferredIncompatibleReturn(fmty(body-ty), fmty(ret-ty)))
-                                          else:
-                                            msg(errFunctionAnnIncompatibleReturn(fmty(body-ty), fmty(ret-ty)))
-                                          end)^seq(return(dynType))
-                                      end
-                                    end)
-                                end)
-                            end)
-                          )
-                      end)
-                    )
+                  # NOTE(dbp 2013-11-16): We need to decide whether to use their type
+                  # or our inferred one. For now, we make the simple decision: if their
+                  # type contains any blanks, we use ours. This can and probably should
+                  # be improved.
+                  inferred = list.any(A.is-a_blank, args.map(_.ann) + [ann])
+                  if inferred:
+                    cases(Type) fty:
+                      | arrowType(arganns, ret, rec) =>
+                        tc-lam(l1, [], map2(fun(b, a): pair(b.id, a) end, args, arganns), ret, body, typeInferred)
+                      | bigLamType(params, type) =>
+                        # type is an arrowType
+                        tc-lam(l1, params, map2(fun(b, a): pair(b.id, a) end, args, type.args), type.ret, body, typeInferred)
+                    end
+                  else:
+                    tc(val)
+                  end
                 | else =>
                   # NOTE(dbp 2013-10-21): This is a bizarre case. It means
                   # we no longer understand the desugaring, so we really
@@ -1796,6 +1965,38 @@ fun tc-let(l :: Loc, name :: A.Bind, val :: A.Expr) -> TCST<Type>:
           end
         end)
     end)
+end
+
+fun tc-lam(l :: Loc, ps :: List<String>, args :: List<Pair<String,Type>>, ret-ty :: Type, body :: A.Expr, inferred :: TypeInferred) -> TCST<Type>:
+  # NOTE(dbp 2013-11-03): Check for type shadowing.
+  bind-params(ps,
+    add-bindings(args,
+      tc(body)^bind(fun(body-ty):
+          subtype(l, body-ty, ret-ty)^bind(fun(st):
+              if st:
+                (if (body-ty == dynType) and (ret-ty <> dynType):
+                    add-warning(l, wmsg(warnFunctionBodyDyn(fmty(ret-ty))))
+                  else: return(nothing)
+                  end)^seq(
+                  return(params-wrap(ps, arrowType(args.map(fun(bnd): bnd.b end),
+                        ret-ty, moreRecord([]))))
+                  )
+              else:
+                cases(TypeInferred) inferred:
+                  | typeNotInferred =>
+                    add-error(l,
+                      msg(errFunctionAnnIncompatibleReturn(fmty(body-ty), fmty(ret-ty))))^seq(
+                      return(dynType))
+                  | typeInferred =>
+                    add-error(l,
+                      msg(errFunctionInferredIncompatibleReturn(fmty(body-ty), fmty(ret-ty))))^seq(
+                      return(dynType))
+                end
+              end
+            end)
+        end)
+      )
+    )
 end
 
 fun tc-app(l :: Loc, fn :: A.Expr, args :: List<A.Expr>) -> TCST<Type>:
@@ -2113,34 +2314,11 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                 | s_if_else(l, branches, elsebranch) => tc-if(l, branches, elsebranch)
                 | s_try(l, body, id, _except) => tc(body)^seq(add-bindings([pair(id.id, id.ann)], tc(_except)))
                 | s_lam(l, ps, args, ann, doc, body, ck) =>
-                  # NOTE(dbp 2013-11-03): Check for type shadowing.
-                  bind-params(ps,
-                    get-type(ann)^bind(fun(ret-ty):
-                        sequence(args.map(fun(b): get-type(b.ann)^bind(fun(t):
-                              return(pair(b.id, t)) end)
-                            end))^bind(fun(new-binds):
-                            add-bindings(new-binds,
-                              tc(body)^bind(fun(body-ty):
-                                  subtype(l, body-ty, ret-ty)^bind(fun(st):
-                                      if st:
-                                        (if (body-ty == dynType) and (ret-ty <> dynType):
-                                            add-warning(l, wmsg(warnFunctionBodyDyn(fmty(ret-ty))))
-                                          else: return(nothing)
-                                          end)^seq(
-                                          return(params-wrap(ps, arrowType(new-binds.map(fun(bnd): bnd.b end),
-                                              ret-ty, moreRecord([]))))
-                                          )
-                                      else:
-                                        add-error(l,
-                                          msg(errFunctionAnnIncompatibleReturn(fmty(body-ty), fmty(ret-ty))))^seq(
-                                          return(dynType))
-                                      end
-                                    end)
-                                end)
-                              )
-                          end)
+                  bind-params(ps, sequence(args.map(fun(b): get-type(b.ann)^bind(fun(t): return(pair(b.id, t)) end) end)))^bind(fun(argpairs):
+                      bind-params(ps, get-type(ann))^bind(fun(ret-ty):
+                          tc-lam(l, ps, argpairs, ret-ty, body, typeNotInferred)
+                        end)
                       end)
-                    )
                 | s_method(l, args, ann, doc, body, ck) => return(dynType)
                 | s_extend(l, super, fields) =>
                   tc(super)^bind(fun(base):
@@ -2193,13 +2371,31 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                   # NOTE(dbp 2013-11-05): Since we type check
                   # pre-desugar code inside 'is' tests for inference, we need
                   # any ast nodes that could appear there (in theory, any surface syntax...)
-                | s_list(l, values) => return(nmty("List"))
+                | s_list(l, values) =>
+                  # NOTE(dbp 2013-11-16): I don't want to re-implement all the logic that
+                  # makes desugared lists work, so I'm just going to manually desugar and
+                  # then typecheck.
+                  tc(values.foldr(fun(v, rst): A.s_app(l, A.s_id(l, "link"), [v, rst]) end, A.s_id(l, "empty")))
                 | else => raise("tc: no case matched for: " + torepr(ast))
               end
               )
           end
           )
-      )
+        )
     end
     )
+where:
+  fun tc-src(src):
+    stx = A.parse(src,"anonymous-file", { ["check"]: false}).with-types
+    eval(tc(stx.block), [], [], [], default-env, default-type-env)
+  end
+  fun tc-stx(stx):
+    eval(tc(stx), [], [], [], default-env, default-type-env)
+  end
+
+  tc-src("1") is nmty("Number")
+  tc-src("[1]") is appty("List", ["Number"])
+  tc-src("[1,2,3]") is appty("List", ["Number"])
+  tc-stx(A.s_list(dummy-loc, [A.s_num(dummy-loc, 1)])) is appty("List", ["Number"])
+  tc-stx(A.s_list(dummy-loc, [A.s_num(dummy-loc, 1), A.s_num(dummy-loc, 2)])) is appty("List", ["Number"])
 end
