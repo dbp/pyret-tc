@@ -1339,34 +1339,34 @@ where:
     eval(is-inferred-functions(stx.block), [], [], [], default-env, default-type-env)
   end
   baseRec = moreRecord([])
-  # iif-src("fun f(): 10 where: f() is 10 end") is
-  # [pair("f", arrowType([], nmty("Number"), baseRec))]
-  # iif-src("fun f(x): 10 where: f('foo') is true end") is
-  #   [pair("f", arrowType([nmty("String")], nmty("Bool"), baseRec))]
-  # iif-src("fun f(x): 10 where: f('foo') is true end
-  #   fun g(): 10 where: g() is 10 end") is
-  #   [pair("f", arrowType([nmty("String")], nmty("Bool"), baseRec)),
-  #   pair("g", arrowType([], nmty("Number"), baseRec))]
-  # iif-src("fun f(x): 10 where: f('foo') is true end
-  #   fun g(): 10 where: f() is 10 end") is
-  # [pair("f", arrowType([nmty("String")], nmty("Bool"), baseRec))]
-  # iif-src("fun f(x): add1(x) where: f('Fo') is 10 end") is
-  # [pair("f", arrowType([nmty("String")], nmty("Number"), baseRec))]
+  iif-src("fun f(): 10 where: f() is 10 end") is
+  [pair("f", arrowType([], nmty("Number"), baseRec))]
+  iif-src("fun f(x): 10 where: f('foo') is true end") is
+    [pair("f", arrowType([nmty("String")], nmty("Bool"), baseRec))]
+  iif-src("fun f(x): 10 where: f('foo') is true end
+    fun g(): 10 where: g() is 10 end") is
+    [pair("f", arrowType([nmty("String")], nmty("Bool"), baseRec)),
+    pair("g", arrowType([], nmty("Number"), baseRec))]
+  iif-src("fun f(x): 10 where: f('foo') is true end
+    fun g(): 10 where: f() is 10 end") is
+  [pair("f", arrowType([nmty("String")], nmty("Bool"), baseRec))]
+  iif-src("fun f(x): add1(x) where: f('Fo') is 10 end") is
+  [pair("f", arrowType([nmty("String")], nmty("Number"), baseRec))]
 
-  # iif-src("fun f(x): x where: f(10) is 10 f(true) is true end") is
-  # [pair("f", bigLamType(["T"], arrowType([nmty("T")], nmty("T"), baseRec)))]
+  iif-src("fun f(x): x where: f(10) is 10 f(true) is true end") is
+  [pair("f", bigLamType(["T"], arrowType([nmty("T")], nmty("T"), baseRec)))]
 
-  # iif-src("fun f(x, y): x where: f(10, 10) is 10 f(true, false) is true end") is
-  # [pair("f", bigLamType(["T"], arrowType([nmty("T"), nmty("T")], nmty("T"), baseRec)))]
+  iif-src("fun f(x, y): x where: f(10, 10) is 10 f(true, false) is true end") is
+  [pair("f", bigLamType(["T"], arrowType([nmty("T"), nmty("T")], nmty("T"), baseRec)))]
 
-  # iif-src("fun f(x, y): x where: f(10, 10) is 10 f(true, 10) is true end") is
-  # [pair("f", bigLamType(["T"], arrowType([nmty("T"), nmty("Number")], nmty("T"), baseRec)))]
+  iif-src("fun f(x, y): x where: f(10, 10) is 10 f(true, 10) is true end") is
+  [pair("f", bigLamType(["T"], arrowType([nmty("T"), nmty("Number")], nmty("T"), baseRec)))]
 
-  # iif-src("fun f(x, y): x where: f(10, 10) is 10 f(true, 10) is true f('foo', 'bar') is 'foo' end") is
-  # [pair("f", bigLamType(["U", "V"], arrowType([nmty("U"), nmty("V")], nmty("U"), baseRec)))]
+  iif-src("fun f(x, y): x where: f(10, 10) is 10 f(true, 10) is true f('foo', 'bar') is 'foo' end") is
+  [pair("f", bigLamType(["U", "V"], arrowType([nmty("U"), nmty("V")], nmty("U"), baseRec)))]
 
-  # iif-src("fun f(x, y, c): x where: f(10, true, 10) is 10 f(true, false, 10) is true f('foo', true, 'bar') is 'foo' end") is
-  # [pair("f", bigLamType(["U", "V"], arrowType([nmty("U"), nmty("Bool"), nmty("V")], nmty("U"), baseRec)))]
+  iif-src("fun f(x, y, c): x where: f(10, true, 10) is 10 f(true, false, 10) is true f('foo', true, 'bar') is 'foo' end") is
+  [pair("f", bigLamType(["U", "V"], arrowType([nmty("U"), nmty("Bool"), nmty("V")], nmty("U"), baseRec)))]
 
   iif-src("fun f(x): x.first where: f([10]) is 10 f(['foo']) is 'foo' end") is
   [pair("f", bigLamType(["T"], arrowType([appty("List", ["T"])], nmty("T"), baseRec)))]
