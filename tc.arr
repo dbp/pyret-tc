@@ -650,7 +650,7 @@ fun tycompat(t1 :: Type, t2 :: Type) -> Bool:
   cases(Type) t1:
     | dynType => true
     | bigLamType(params, type) =>
-      not is-incompatible(tysolve(params, [pair(type, t2)], []))
+      not is-incompatible(tysolve(params, [pair(type, rename-params(params, params.map(nmty), [t2]).types.first)], []))
     | else =>
       cases(Type) t2:
         | dynType => true
@@ -860,12 +860,18 @@ fun tysolve(vars :: List<String>, _eqs :: List<Pair<Type, Type>>, tys :: List<Ty
                     end
                   end
                 | anonType(rec1) =>
-                  (cases(Type) t2:
-                      | anonType(rec2) =>
-                        recgen(rec1, rec2)
-                      | bigLamType(params, type) => solve-nested(params, type, t1)
-                      | else => raise(nothing)
-                    end) + congen(r)
+                  cases(Type) t2:
+                    | anonType(rec2) =>
+                      recgen(rec1, rec2) + congen(r)
+                    | bigLamType(params, type) => solve-nested(params, type, t1) + congen(r)
+                    | nameType(n2) =>
+                      if vars.member(n2):
+                        link(pair(n2, t1), congen(r))
+                      else:
+                        raise(nothing)
+                      end
+                    | else => raise(nothing)
+                  end
                 | arrowType(args1, ret1, rec1) =>
                   cases(Type) t2:
                     | arrowType(args2, ret2, rec2) =>
@@ -876,6 +882,12 @@ fun tysolve(vars :: List<String>, _eqs :: List<Pair<Type, Type>>, tys :: List<Ty
                         recgen(rec1, rec2) + congen(r)
                       end
                     | bigLamType(params, type) => solve-nested(params, type, t1)
+                    | nameType(n2) =>
+                      if vars.member(n2):
+                        link(pair(n2, t1), congen(r))
+                      else:
+                        raise(nothing)
+                      end
                     | else =>
                       if is-nameType(t2) and vars.member(t2.name):
                         link(pair(t2.name, t1), congen(r))
@@ -893,6 +905,12 @@ fun tysolve(vars :: List<String>, _eqs :: List<Pair<Type, Type>>, tys :: List<Ty
                         recgen(rec1, rec2) + congen(r)
                       end
                     | bigLamType(params, type) => solve-nested(params, type, t1)
+                    | nameType(n2) =>
+                      if vars.member(n2):
+                        link(pair(n2, t1), congen(r))
+                      else:
+                        raise(nothing)
+                      end
                     | else =>
                       if is-nameType(t2) and vars.member(t2.name):
                         link(pair(t2.name, t1), congen(r))
@@ -909,6 +927,12 @@ fun tysolve(vars :: List<String>, _eqs :: List<Pair<Type, Type>>, tys :: List<Ty
                         congen(zip2(args1, args2)) + congen(r)
                       end
                     | bigLamType(params, type) => solve-nested(params, type, t1)
+                    | nameType(n2) =>
+                      if vars.member(n2):
+                        link(pair(n2, t1), congen(r))
+                      else:
+                        raise(nothing)
+                      end
                     | else =>
                       if is-nameType(t2) and vars.member(t2.name):
                         link(pair(t2.name, t1), congen(r))
@@ -1069,6 +1093,9 @@ where:
 
   tysolve([], [pair(nmty("Bool"), nmty("Bool"))], []) is allSolved([])
   tysolve(["T"], [pair(nmty("Bool"), nmty("Bool"))], [nmty("T")]) is someSolved([dynType])
+
+  tysolve(["T"], [pair(appty("Option", [anonType(normalRecord([pair("in", nmty("Number"))]))]),
+                       appty("Option", ["T"]))], [nmty("T")]) is allSolved([anonType(normalRecord([pair("in", nmty("Number"))]))])
 end
 
 
@@ -2038,7 +2065,7 @@ fun tc-let(l :: Loc, name :: A.Bind, val :: A.Expr) -> TCST<Type>:
             | none =>
               tc(val)^bind(fun(ty):
                   subtype(l, ty, bindty)^bind(fun(st):
-                      if not st:
+                      if (not st) and (not tycompat(ty, bindty)):
                         add-error(l, msg(errAssignWrongType(name.id, fmty(bindty), fmty(ty))))^seq(
                           return(dynType))
                       else:
