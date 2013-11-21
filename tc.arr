@@ -619,6 +619,12 @@ fun appty(name :: String, args :: List) -> Type:
   appType(name, args.map(fun(t): if String(t): nmty(t) else: t end end))
 end
 
+fun arrty(args :: List, ret) -> Type:
+  fun s2t(x): if String(x): nmty(x) else: x end end
+  arrowType(args.map(s2t), s2t(ret), moreRecord([]))
+end
+
+
 fun params-wrap(ps :: List<String>, t :: Type):
   if ps == []:
     t
@@ -1929,6 +1935,8 @@ default-type-env = [
           ])))),
   pair(nameType("Option"), typeAlias(bigLamType(["T"], appType("Option", [nmty("T")])))),
   pair(bigLamType(["T"], appType("Option", [nmty("T")])), typeNominal(anonType(moreRecord([])))),
+  pair(nameType("Set"), typeAlias(bigLamType(["T"], appType("Set", [nmty("T")])))),
+  pair(bigLamType(["T"], appType("Set", [nmty("T")])), typeNominal(anonType(moreRecord([])))),
   pair(nameType("Nothing"), typeNominal(anonType(normalRecord([]))))
 ]
 
@@ -1943,28 +1951,100 @@ default-env = [
           pair("equiv", arrowType([nmty("Any"), nmty("Any")], nmty("Bool"), moreRecord([])))
         ]))),
   pair("error", anonType(moreRecord([]))),
+  pair("checkers", anonType(moreRecord([]))),
+  pair("option", anonType(moreRecord([]))),
+  pair("cs173", anonType(moreRecord([]))),
+
   pair("link", bigLamType(["T"], arrowType([nmty("T"), appty("List", ["T"])], appty("List", ["T"]), moreRecord([])))),
   pair("empty", bigLamType(["T"], appType("List", [nmty("T")]))),
+  pair("is-link", arrty([anyType], "Bool")),
+  pair("is-empty", arrty([anyType], "Bool")),
   pair("nothing", nmty("Nothing")),
   pair("some", bigLamType(["T"], arrowType([nmty("T")], appty("Option", ["T"]), moreRecord([])))),
   pair("none", bigLamType(["T"], appType("Option", [nmty("T")]))),
+  pair("is-some", arrty([anyType], "Bool")),
+  pair("is-none", arrty([anyType], "Bool")),
   pair("true", nmty("Bool")),
   pair("false", nmty("Bool")),
   pair("print", arrowType([anyType], nmty("Nothing"), moreRecord([]))),
   pair("tostring", arrowType([anyType], nmty("String"), moreRecord([]))),
   pair("torepr", arrowType([anyType], nmty("String"), moreRecord([]))),
-  pair("fold", dynType),
-  pair("map", bigLamType(["U", "T"], arrowType([arrowType([nmty("T")], nmty("U"), moreRecord([])), appty("List", ["T"])], appty("List", ["U"]), moreRecord([])))),
+  pair("map", bigLamType(["U", "T"], arrty([arrty(["T"], "U"), appty("List", ["T"])], appty("List", ["U"])))),
+  pair("filter", bigLamType(["T"], arrty([arrty(["T"], "Bool"), appty("List", ["T"])], appty("List", ["T"])))),
+  pair("range", arrty(["Number", "Number"], appty("List", ["Number"]))),
+  pair("range-by", arrty(["Number", "Number", "Number"], appty("List", ["Number"]))),
+  pair("repeat", bigLamType(["T"], arrty(["Number", "T"], appty("List", ["T"])))),
+  pair("partition", bigLamType(["T"], arrty([arrty(["T"], "Bool"), appty("List", ["T"])], appty("List", ["T"])))),
+  pair("any", bigLamType(["T"], arrty([arrty(["T"], "Bool"), appty("List", ["T"])], "Bool"))),
+  pair("find", bigLamType(["T"], arrty([arrty(["T"], "Bool"), appty("List", ["T"])], appty("Option", ["T"])))),
   pair("map2", dynType),
-  pair("raise", arrowType([anyType], dynType, moreRecord([]))),
+  pair("map3", dynType),
+  pair("map4", dynType),
+  pair("map_n", dynType),
+  pair("map2_n", dynType),
+  pair("map3_n", dynType),
+  pair("map4_n", dynType),
+  pair("each", bigLamType(["T"], arrty([arrty(["T"], "Nothing"), appty("List", ["T"])], "Nothing"))),
+  pair("each2", dynType),
+  pair("each3", dynType),
+  pair("each4", dynType),
+  pair("each_n", dynType),
+  pair("each2_n", dynType),
+  pair("each3_n", dynType),
+  pair("each4_n", dynType),
+  pair("fold", bigLamType(["U", "T"], arrty([arrty(["U", "T"], "U"), "U", appty("List", ["T"])], "U"))),
+  pair("fold2", dynType),
+  pair("fold3", dynType),
+  pair("fold4", dynType),
+  pair("index", bigLamType(["T"], arrty([appty("List", ["T"]), "Number"], "T"))),
+
+  # NOTE(dbp 2013-11-21): I don't know where this is defined (not in sets.rkt in racket-ffi)
+  pair("sets", dynType),
+  pair("set", bigLamType(["T"], arrty([appty("List", ["T"])], appty("Set", ["T"])))),
+  pair("tree-set", bigLamType(["T"], arrty([appty("List", ["T"])], appty("Set", ["T"])))),
+  # NOTE(dbp 2013-11-21): Should list-set and tree set be distinct? Probably...
+  pair("list-set", bigLamType(["T"], arrty([appty("List", ["T"])], appty("Set", ["T"])))),
   pair("identical", arrowType([anyType, anyType], nmty("Bool"), moreRecord([]))),
+  pair("string-to-list", arrty(["String"], appty("List", ["String"]))),
+
+  pair("raise", arrowType([anyType], dynType, moreRecord([]))),
   pair("Racket", dynType),
-  pair("List", arrowType([anyType], nmty("Bool"), moreRecord([]))),
-  pair("String", arrowType([anyType], nmty("Bool"), moreRecord([]))),
-  pair("Function", arrowType([anyType], nmty("Bool"), moreRecord([]))),
-  pair("Bool", arrowType([anyType], nmty("Bool"), moreRecord([]))),
-  pair("Number", arrowType([anyType], nmty("Bool"), moreRecord([]))),
-  pair("Nothing", arrowType([anyType], nmty("Bool"), moreRecord([])))
+  pair("Any", arrty([anyType], "Bool")),
+  pair("List", arrty([anyType], "Bool")),
+  pair("String", arrty([anyType], "Bool")),
+  pair("Function", arrty([anyType], "Bool")),
+  pair("Bool", arrty([anyType], "Bool")),
+  pair("Number", arrty([anyType], "Bool")),
+  pair("Nothing", arrty([anyType], "Bool")),
+  pair("Mutable", arrty([anyType], "Bool")),
+  pair("Placeholder", arrty([anyType], "Bool")),
+  pair("Opaque", arrty([anyType], "Bool")),
+  pair("is-bool", arrty([anyType], "Bool")),
+  pair("is-boolean", arrty([anyType], "Bool")),
+  pair("is-function", arrty([anyType], "Bool")),
+  pair("is-method", arrty([anyType], "Bool")),
+  pair("is-number", arrty([anyType], "Bool")),
+  pair("is-object", arrty([anyType], "Bool")),
+  pair("is-string", arrty([anyType], "Bool")),
+  pair("is-nothing", arrty([anyType], "Bool")),
+  pair("is-mutable", arrty([anyType], "Bool")),
+  pair("is-placeholder", arrty([anyType], "Bool")),
+  pair("brander", arrty([],
+      anonType(normalRecord([
+            pair("brand", bigLamType(["T"], arrty(["T"], "T"))),
+            pair("check", arrty([anyType], "Bool"))
+          ])))),
+  pair("check-brand", bigLamType(["T"], arrty([arrty(["T"], "Bool"), "T", nmty("String")], "T"))),
+  # TODO(dbp 2013-11-21): figure out types for these mk-* functions.
+  pair("mk-mutable", dynType),
+  pair("mk-simple-mutable", dynType),
+  pair("mk-placeholder", arrty([anyType], "Bool")),
+  pair("is-nothing", arrty([anyType], "Bool")),
+  pair("gensym", arrty([], "String")),
+  pair("pi", nmty("Number")),
+  pair("prim-has-field", arrty([anyType, "String"], "Bool")),
+  pair("prim-keys", arrty([anyType], appty("List", ["String"]))),
+  pair("prim-num-keys", arrty([anyType], "Number"))
 ]
 
 fun tc-main(p, s):
