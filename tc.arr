@@ -1933,6 +1933,18 @@ default-type-env = [
             pair("_plus", app-mty("List", "T", [appty("List", ["T"])], appty("List", ["T"]))),
             pair("push", app-mty("List", "T", [nmty("T")], appty("List", ["T"])))
           ])))),
+  pair(nameType("Array"), typeAlias(bigLamType(["T"],appType("Array", [nmty("T")])))),
+  pair(bigLamType(["T"],appType("Array", [nmty("T")])),
+    typeNominal(anonType(normalRecord([
+            pair("_equals", app-mty("Array", "T", ["Any"], "Bool")),
+            pair("eq", app-mty("Array", "T", ["Any"], "Bool")),
+            pair("_torepr", app-mty("Array", "T", [], "String")),
+            pair("tostring", app-mty("Array", "T", [], "String")),
+            pair("get", app-mty("Array", "T", ["Number"], nmty("T"))),
+            pair("set", app-mty("Array", "T", ["Number", nmty("T")], appty("Array", ["T"]))),
+            pair("to-list", app-mty("Array", "T", [], appty("List", ["T"]))),
+            pair("length", app-mty("Array", "T", [], "Number"))
+          ])))),
   pair(nameType("Option"), typeAlias(bigLamType(["T"], appType("Option", [nmty("T")])))),
   pair(bigLamType(["T"], appType("Option", [nmty("T")])), typeNominal(anonType(moreRecord([])))),
   pair(nameType("Set"), typeAlias(bigLamType(["T"], appType("Set", [nmty("T")])))),
@@ -2007,6 +2019,14 @@ default-env = [
   pair("identical", arrowType([anyType, anyType], nmty("Bool"), moreRecord([]))),
   pair("string-to-list", arrty(["String"], appty("List", ["String"]))),
 
+  pair("array", bigLamType(["T"], arrty([appty("List", ["T"])], appty("Array", ["T"])))),
+  pair("array-of", bigLamType(["T"], arrty([nmty("T"), nmty("Number")], appty("Array", ["T"])))),
+  pair("build-array", bigLamType(["T"], arrty([arrty([nmty("Number")], nmty("T")), nmty("Number")], appty("Array", ["T"])))),
+  pair("array-length", bigLamType(["T"], arrty([appty("Array", ["T"])], nmty("Number")))),
+  pair("array-get", bigLamType(["T"], arrty([appty("Array", ["T"]), nmty("Number")], nmty("T")))),
+  pair("array-set", bigLamType(["T"], arrty([appty("Array", ["T"]), nmty("Number"), nmty("T")], appty("Array", ["T"])))),
+  pair("array-to-list", bigLamType(["T"], arrty([appty("Array", ["T"])], appty("List", ["T"])))),
+
   pair("raise", arrowType([anyType], dynType, moreRecord([]))),
   pair("Racket", dynType),
   pair("Any", arrty([anyType], "Bool")),
@@ -2019,6 +2039,7 @@ default-env = [
   pair("Mutable", arrty([anyType], "Bool")),
   pair("Placeholder", arrty([anyType], "Bool")),
   pair("Opaque", arrty([anyType], "Bool")),
+  pair("Array", arrty([anyType], "Bool")),
   pair("is-bool", arrty([anyType], "Bool")),
   pair("is-boolean", arrty([anyType], "Bool")),
   pair("is-function", arrty([anyType], "Bool")),
@@ -2029,6 +2050,7 @@ default-env = [
   pair("is-nothing", arrty([anyType], "Bool")),
   pair("is-mutable", arrty([anyType], "Bool")),
   pair("is-placeholder", arrty([anyType], "Bool")),
+  pair("is-array", arrty([anyType], "Bool")),
   pair("brander", arrty([],
       anonType(normalRecord([
             pair("brand", bigLamType(["T"], arrty(["T"], "T"))),
