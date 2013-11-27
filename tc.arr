@@ -435,7 +435,7 @@ data TCError:
       "The variant pattern for cases branch " + self.name + " should have " + tostring(self.expected) + " fields, not " + tostring(self.given)  + "."
     end
   | errCasesBranchType(types) with: tostring(self):
-      "All branches of a cases expression must evaluate to the same type. Found branches with incompatible types: " + self.types.join-str(", ") +"."
+      "All branches of a cases expression must evaluate to the same type. Found branches with incompatible types: " + self.types.join-str(", ") + "."
     end
   | errTypeNotDefined(type) with: tostring(self):
       "The " + self.type + " type is not defined. Did you forget to import, or forget to add the type parameter?"
@@ -491,7 +491,7 @@ fun fmty(type :: Type) -> String:
           "{" + fmfields(fields) + "...}"
       end
     | arrowType(args, ret, rec) => fmarrow([], args, ret)
-    | methodType(self, args, ret, rec) => fmarrow([], [self]+args, ret)
+    | methodType(self, args, ret, rec) => fmarrow([], [self] + args, ret)
     | appType(name, args) => name + "<" + args.map(fmty).join-str(", ") + ">"
     | bigLamType(params, ty) =>
       cases(Type) ty:
@@ -1306,7 +1306,7 @@ fun is-inferred-functions(ast :: A.Expr) -> TCST<List<Pair<String, Type>>>:
           # NOTE(dbp 2013-10-21): Really simple for now - only if it
           # is of form funname(args) is bar.
           cases(A.Expr) l:
-            | s_app(l1, fn, args) =>
+            | s_app(l1, typarams, fn, args) =>
               cases(A.Expr) fn:
                 | s_id(l2, fname) =>
                   if fname == name:
@@ -2075,12 +2075,9 @@ fun tc-main(p, s):
   # with inferring functions, but then will do this again when we start type checking...
   bindings = eval(get-bindings(stx.with-types.block), [], [], [], default-env, default-type-env)
   iifs = eval(is-inferred-functions(stx.pre-desugar.block), [], [], [], bindings + default-env, default-type-env)
-  run(tc-prog(stx.with-types), [], [], iifs, default-env, default-type-env)
+  run(infer(stx.with-types.block)^bind(fun(ast): tc(ast) end), [], [], iifs, default-env, default-type-env)
 end
 
-fun tc-prog(prog :: A.Program) -> TCST<Type>:
-  tc(prog.block)
-end
 
 fun tc-member(ast :: A.Member) -> TCST<Option<Pair<String,Type>>>:
   cases(A.Member) ast:
@@ -2148,6 +2145,41 @@ where:
         return(bigLamType(["U"], appty("Option", ["U"]))), return(appty("Option", ["String"]))]), [], [], [], [], default-type-env)
     is branchCompatible(appty("Option", ["String"]))
 
+end
+
+
+################################################################################
+# Local type inference.                                                        #
+################################################################################
+
+fun infer(ast :: A.Expr) -> TCST<A.Expr>:
+  cases(A.Expr) ast:
+    | s_block(l, stmts) => return(ast)
+    | s_user_block(l, block) => return(ast)
+    | s_var(l, name, val) => return(ast)
+    | s_let(l, name, val) => return(ast)
+    | s_assign(l, id, val) => return(ast)
+    | s_if_else(l, branches, elsebranch) => return(ast)
+    | s_try(l, body, id, _except) => return(ast)
+    | s_lam(l, ps, args, ann, doc, body, ck) => return(ast)
+    | s_method(l, args, ann, doc, body, ck) => return(ast)
+    | s_extend(l, super, fields) => return(ast)
+    | s_update(l, super, fields) => return(ast)
+    | s_obj(l, fields) => return(ast)
+    | s_app(l, typarams, fn, args) => return(ast)
+    | s_id(l, id) => return(ast)
+    | s_num(l, num) => return(ast)
+    | s_bool(l, bool) => return(ast)
+    | s_str(l, str) => return(ast)
+    | s_get_bang(l, obj, str) => return(ast)
+    | s_bracket(l, obj, field) => return(ast)
+    | s_colon_bracket(l, obj, field) => return(ast)
+    | s_datatype(l, name, params, variants, check) => return(ast)
+    | s_cases(l, type, val, branches) => return(ast)
+    | s_cases_else(l, type, val, branches, _else) => return(ast)
+    | s_list(l, values) => return(ast)
+    | else => raise("infer: no case matched for: " + torepr(ast))
+  end
 end
 
 
@@ -2242,7 +2274,7 @@ fun tc-lam(l :: Loc, ps :: List<String>, args :: List<Pair<String,Type>>, ret-ty
     )
 end
 
-fun tc-app(l :: Loc, fn :: A.Expr, args :: List<A.Expr>) -> TCST<Type>:
+fun tc-app(l :: Loc, typarams :: List<A.Ann>, fn :: A.Expr, args :: List<A.Expr>) -> TCST<Type>:
   tc(fn)^bind(fun(fn-ty):
       cases(Type) fn-ty:
         | arrowType(arg-types, ret-type, rec-type) =>
@@ -2591,7 +2623,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                     end)^bind(fun(record):
                       return(anonType(record))
                     end)
-                | s_app(l, fn, args) => tc-app(l, fn, args)
+                | s_app(l, params, fn, args) => tc-app(l, params, fn, args)
                 | s_id(l, id) =>
                   get-env()^bind(fun(env):
                       cases(option.Option) map-get(env, id):
@@ -2618,7 +2650,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                   # NOTE(dbp 2013-11-16): I don't want to re-implement all the logic that
                   # makes desugared lists work, so I'm just going to manually desugar and
                   # then typecheck.
-                  tc(values.foldr(fun(v, rst): A.s_app(l, A.s_id(l, "link"), [v, rst]) end, A.s_id(l, "empty")))
+                  tc(values.foldr(fun(v, rst): A.s_app(l, [], A.s_id(l, "link"), [v, rst]) end, A.s_id(l, "empty")))
                 | else => raise("tc: no case matched for: " + torepr(ast))
               end
               )
