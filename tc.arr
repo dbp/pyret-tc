@@ -383,8 +383,17 @@ data TCError:
   | errArityMismatch(expected, given) with: tostring(self):
       "Arity mismatch: function expected " + tostring(self.expected) + " arguments, but was passed " + tostring(self.given) + "."
     end
+  | errApplyUninstantiatedFunction(fnty) with: tostring(self):
+      "Can not apply function with type " + fmty(self.fnty) + " without explicit type parameters."
+    end
   | errParamArityMismatch(expected, given) with: tostring(self):
       "Function applied with the wrong number of type parameters. Expected " + tostring(self.expected) + " but was applied with " + tostring(self.given) + "."
+    end
+  | errInstantiateArityMismatch(type, expected, given) with: tostring(self):
+      "Type " + fmty(self.type) + " instantiated with the wrong number of type parameters. Expected " + tostring(self.expected) + " but was applied with " + tostring(self.given) + "."
+    end
+  | errInstantiateNonParametric(type, params) with: tostring(self):
+      "Unable to instantiate type " + fmty(self.type) + " with parameters <" + self.params.map(fmty).join-str(", ") + "> - it is not a parametric type."
     end
   | errArgumentBadType(position, expected, given) with: tostring(self):
       "The " + ordinalize(self.position) + " argument was expected to be of type " + self.expected + ", but was the incompatible type " + self.given + "."
@@ -432,13 +441,13 @@ end
 
 data TCWarning:
   | warnFunctionBodyDyn(retty) with: tostring(self):
-      "Function body had " + self.retty + " specified as a return type, but type checker found Dyn."
+      "Function body had " + self.retty + " specified as a return type, but type checker found Dyn*."
     end
   | warnInferredTypeParametersIncomplete(typarams) with: tostring(self):
       "Failed to infer all parameters for function application. Inferred types: " + self.typarams.map(fmty).join-str(", ") + "."
     end
   | warnBindingDyn(id, type) with: tostring(self):
-      "'" + self.id + "' had " + fmty(self.type) + " specified as type, but type checker found Dyn."
+      "'" + self.id + "' had " + fmty(self.type) + " specified as type, but type checker found Dyn*."
     end
 end
 
@@ -1314,7 +1323,7 @@ fun is-inferred-functions(ast :: A.Expr) -> TCST<List<Pair<String, Type>>>:
           # is of form funname(args) is bar.
           infer(_l)^bind(fun(l):
               cases(A.Expr) l:
-                | s_app(l1, typarams, fn, args) =>
+                | s_app(l1, fn, args) =>
                   cases(A.Expr) fn:
                     | s_id(l2, fname) =>
                       if fname == name:
@@ -2084,7 +2093,9 @@ fun tc-main(p, s):
   # with inferring functions, but then will do this again when we start type checking...
   bindings = eval(get-bindings(stx.with-types.block), [], [], [], default-env, default-type-env)
   iifs = eval(is-inferred-functions(stx.pre-desugar.block), [], [], [], bindings + default-env, default-type-env)
-  run(infer(stx.with-types.block)^bind(fun(ast): tc(ast) end), [], [], iifs, default-env, default-type-env)
+  run(infer(stx.with-types.block)^bind(fun(ast):
+        tc(ast)
+      end), [], [], iifs, default-env, default-type-env)
 end
 
 
@@ -2175,6 +2186,10 @@ fun infer(ast :: A.Expr) -> TCST<A.Expr>:
                 | s_user_block(l, block) => infer(block)^bind(fun(block_):
                       return(A.s_user_block(block))
                     end)
+                | s_instantiate(l, expr, params) =>
+                  # NOTE(dbp 2013-12-03): this seems wrong. Want to infer deeper in expr,
+                  # but not the top level, as we have explicit instantiation. Not sure how.
+                  return(ast)
                 | s_var(l, name, val) =>
                   infer(val)^bind(fun(val_): return(A.s_var(l, name, val_)) end)
                 | s_let(l, name, val) =>
@@ -2248,20 +2263,64 @@ fun infer(ast :: A.Expr) -> TCST<A.Expr>:
                       end))^bind(fun(fields_):
                       return(A.s_obj(l, fields_))
                     end)
-                | s_app(l, typarams, fn, args) =>
+                | s_app(l, fn, args) =>
                   tc(fn)^bind(fun(fn-ty):
-                      if is-bigLamType(fn-ty) and is-arrowType(fn-ty.type) and (typarams.length() == 0):
+                      if is-bigLamType(fn-ty) and is-arrowType(fn-ty.type):
                         sequence(args.map(tc))^bind(fun(arg-vals):
                             renamed-arg-vals = rename-params(fn-ty.params, arg-vals, arg-vals).types
-                            cases(TySolveRes) tysolve(fn-ty.params, zip2(fn-ty.type.args, renamed-arg-vals), fn-ty.params.map(nmty)):
+                            fun arg-inst(params, stx, vty, _aty):
+                              doc: "wrap stx in s_instantiate if needed"
+                              if is-bigLamType(vty):
+                                aty = for fold(b from _aty, p from zip2(params, fn-ty.params)):
+                                    replace(nmty(p.b), p.a, b)
+                                end
+                                cases(TySolveRes) tysolve(vty.params, [pair(vty.type, aty)], vty.params.map(nmty)):
+                                  | allSolved(vs) =>
+                                    return(A.s_instantiate(stx.l, stx, vs.map(unget-type(_, stx.l))))
+                                  | someSolved(vs) =>
+                                    add-warning(l, wmsg(warnInferredTypeParametersIncomplete(vs)))
+                                    ^seq(
+                                      return(A.s_instantiate(stx.l, stx, vs.map(unget-type(_, stx.l)))))
+                                  | incompatible =>
+                                    raise("infer: an arg could not be unified with its type, even when all the args unified, which means there is a bug in the type checker, as this shouldn't be able to happen.")
+                                end
+                              else:
+                                return(stx)
+                              end
+                            end
+                            cases(TySolveRes) tysolve(
+                                  fn-ty.params,
+                                  zip2(fn-ty.type.args, renamed-arg-vals),
+                                  fn-ty.params.map(nmty)):
                               | allSolved(vs) =>
-                                return(A.s_app(l, vs.map(unget-type(_, l)), fn, args))
-                              | someSolved(vs) =>
+                                sequence(map3(
+                                    arg-inst(vs,_,_,_),
+                                    args,
+                                    renamed-arg-vals,
+                                    fn-ty.type.args))^bind(fun(args-instantiated):
+                                return(A.s_app(l, A.s_instantiate(l, fn,
+                                      vs.map(unget-type(_, l))),
+                                        args-instantiated))
+                                  end)
+                                | someSolved(vs) =>
                                 add-warning(l, wmsg(warnInferredTypeParametersIncomplete(vs)))
-                                ^seq(return(A.s_app(l, vs.map(unget-type(_, l)), fn, args)))
+                                ^seq(
+                                  sequence(map3(
+                                      arg-inst(vs,_,_,_),
+                                      args,
+                                      renamed-arg-vals,
+                                      fn-ty.type.args))^bind(fun(args-instantiated):
+                                      return(A.s_app(l,
+                                          A.s_instantiate(l,
+                                            fn,
+                                            vs.map(unget-type(_, l))),
+                                          args-instantiated))
+                                    end))
                               | incompatible =>
                                 add-error(l, msg(errFunctionArgumentsIncompatible(fn-ty, arg-vals)))^seq(
-                                  return(A.s_app(l, fn-ty.params.map(fun(_): dynType end).map(unget-type(_, l)), fn, args)))
+                                  return(A.s_app(l, A.s_instantiate(l, fn,
+                                        fn-ty.params.map(fun(_): dynType end).map(unget-type(_, l))),
+                                       args)))
                             end
                           end)
                       else:
@@ -2439,7 +2498,7 @@ fun tc-lam(l :: Loc, ps :: List<String>, args :: List<Pair<String,Type>>, ret-ty
     )
 end
 
-fun tc-app(l :: Loc, params-inst :: List<A.Ann>, fn :: A.Expr, args :: List<A.Expr>) -> TCST<Type>:
+fun tc-app(l :: Loc, fn :: A.Expr, args :: List<A.Expr>) -> TCST<Type>:
   fun tc-args(args_ :: List<A.Expr>, arg-types :: List<Type>, ret-type :: Type) -> TCST<Type>:
     sequence(args_.map(tc))^bind(fun(arg-vals):
         (for foldm(base from pair(1, ret-type), ap from zip2(arg-types, arg-vals)):
@@ -2472,15 +2531,8 @@ fun tc-app(l :: Loc, params-inst :: List<A.Ann>, fn :: A.Expr, args :: List<A.Ex
                 add-error(l,
                   msg(errArityMismatch(arg-types.length(), args.length())))^seq(
                   return(dynType))
-              else if params.length() <> params-inst.length():
-                add-error(l,
-                  msg(errParamArityMismatch(params.length(), params-inst.length())))^seq(
-                  return(dynType))
               else:
-                sequence(params-inst.map(get-type))^bind(fun(params-inst-tys):
-                    add-types(zip2(params.map(nmty), params-inst-tys.map(typeAlias)),
-                      tc-args(args, arg-types, ret-type))
-                  end)
+                add-error(l, msg(errApplyUninstantiatedFunction(fn-ty)))^seq(return(dynType))
               end
             | dynType => return(dynType)
             | else =>
@@ -2757,6 +2809,32 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                 | s_user_block(l, block) => tc(block)
                   # NOTE(dbp 2013-11-10): As of now, the type system does not know about mutation,
                   # so vars look like lets.
+                | s_hint_expr(l, hs, e) => tc(e)
+                | s_instantiate(l, expr, _params) =>
+                  tc(expr)^bind(fun(exprty):
+                      sequence(_params.map(get-type))^bind(fun(params):
+                          cases(Type) exprty:
+                            | bigLamType(ps, type) =>
+                              if ps.length() <> params.length():
+                                if is-arrowType(type):
+                                  add-error(l, msg(errParamArityMismatch(ps.length(), params.length())))
+                                  ^seq(return(dynType))
+                                else:
+                                  add-error(l,
+                                    msg(errInstantiateArityMismatch(type, ps.length(), params.length())))
+                                  ^seq(return(dynType))
+                                end
+                              else:
+                                return(for fold(base from type, rp from zip2(ps, params)):
+                                    replace(nmty(rp.a), rp.b, base)
+                                  end)
+                              end
+                            | else =>
+                              add-error(l, msg(errInstantiateNonParametric(exprty, params)))
+                              ^seq(return(dynType))
+                          end
+                        end)
+                    end)
                 | s_var(l, name, val) => tc-let(l, name, val)
                 | s_let(l, name, val) => tc-let(l, name, val)
                 | s_assign(l, id, val) => return(dynType)
@@ -2797,8 +2875,8 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                     end)^bind(fun(record):
                       return(anonType(record))
                     end)
-                | s_app(l, params, fn, args) =>
-                  tc-app(l, params, fn, args)
+                | s_app(l, fn, args) =>
+                  tc-app(l, fn, args)
                 | s_id(l, id) =>
                   get-env()^bind(fun(env):
                       cases(option.Option) map-get(env, id):
@@ -2825,7 +2903,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                   # NOTE(dbp 2013-11-16): I don't want to re-implement all the logic that
                   # makes desugared lists work, so I'm just going to manually desugar and
                   # then typecheck.
-                  infer(values.foldr(fun(v, rst): A.s_app(l, [], A.s_id(l, "link"), [v, rst]) end, A.s_id(l, "empty")))^bind(tc)
+                  infer(values.foldr(fun(v, rst): A.s_app(l, A.s_id(l, "link"), [v, rst]) end, A.s_id(l, "empty")))^bind(tc)
                 | else => raise("tc: no case matched for: " + torepr(ast))
               end
               )
