@@ -159,29 +159,6 @@ data Type:
   | methodType(self :: Type, args :: List<Type>, ret :: Type, record :: RecordType)
   | appType(name :: String, args :: List<Type>)
   | bigLamType(params :: List<String>, type :: Type)
-sharing:
-  _equals(self, other):
-    cases(Type) self:
-      | dynType => is-dynType(other)
-      | anyType => is-anyType(other)
-      | nameType(name) =>
-        is-nameType(other) and (name == other.name)
-      | anonType(record) =>
-        is-anonType(other) and (record == other.record)
-      | arrowType(args, ret, record) =>
-        is-arrowType(other) and (args == other.args)
-        and (ret == other.ret) and (record == other.record)
-      | methodType(mself, args, ret, record) =>
-        is-methodType(other) and (mself == other.self)
-        and (args == other.args)
-        and (ret == other.ret) and (record == other.record)
-      | appType(name, args) =>
-        is-appType(other) and (name == other.name)
-        and (args == other.args)
-      | bigLamType(params, type) =>
-        is-bigLamType(other) and (self.type == other.type)
-    end
-  end
 where:
   anyType == anyType is true
   nameType("Foo") == appType("Foo", []) is false
@@ -195,13 +172,6 @@ data RecordType:
     # NOTE(dbp 2013-10-16): For when we know there are more fields,
     # but aren't sure what they are.
   | moreRecord(fields :: Map<String,Type>)
-sharing:
-  _equals(self, other):
-    cases(RecordType) self:
-      | normalRecord(fields) => is-normalRecord(other) and (fields == other.fields)
-      | moreRecord(fields) => is-moreRecord(other) and (fields == other.fields)
-    end
-  end
 end
 
 data TypeInferred:
@@ -413,6 +383,9 @@ data TCError:
   | errArityMismatch(expected, given) with: tostring(self):
       "Arity mismatch: function expected " + tostring(self.expected) + " arguments, but was passed " + tostring(self.given) + "."
     end
+  | errParamArityMismatch(expected, given) with: tostring(self):
+      "Function applied with the wrong number of type parameters. Expected " + tostring(self.expected) + " but was applied with " + tostring(self.given) + "."
+    end
   | errArgumentBadType(position, expected, given) with: tostring(self):
       "The " + ordinalize(self.position) + " argument was expected to be of type " + self.expected + ", but was the incompatible type " + self.given + "."
     end
@@ -450,7 +423,7 @@ data TCError:
       "Dotted annotations are currently not supported, so we are treating " + self.obj + "." + self.field + " as the Dynamic type."
     end
   | errFunctionArgumentsIncompatible(fnty, arg-tys) with: tostring(self):
-      "Function with type " + self.fnty + " not compatible with arguments " + self.arg-tys.join-str(", ") + "."
+      "Function with type " + fmty(self.fnty) + " not compatible with arguments " + self.arg-tys.map(fmty).join-str(", ") + "."
     end
   | errAppTypeNotWellFormed(inst, gen) with: tostring(self):
       "Type " + self.inst + " is not a well-formed instance of the type " + self.gen + "."
@@ -460,6 +433,12 @@ end
 data TCWarning:
   | warnFunctionBodyDyn(retty) with: tostring(self):
       "Function body had " + self.retty + " specified as a return type, but type checker found Dyn."
+    end
+  | warnInferredTypeParametersIncomplete(typarams) with: tostring(self):
+      "Failed to infer all parameters for function application. Inferred types: " + self.typarams.map(fmty).join-str(", ") + "."
+    end
+  | warnBindingDyn(id, type) with: tostring(self):
+      "'" + self.id + "' had " + fmty(self.type) + " specified as type, but type checker found Dyn."
     end
 end
 
@@ -651,6 +630,18 @@ where:
   tyshallowequals(nmty("A"), dynType) is false
 end
 
+fun tydyneq(t1 :: Type, t2 :: Type) -> Bool:
+  doc: "equality that allows either side to be Dyn"
+  cases(Type) t1:
+    | dynType => true
+    | else =>
+      cases(Type) t2:
+        | dynType => true
+        | else => t1 == t2
+      end
+  end
+end
+
 fun tycompat(t1 :: Type, t2 :: Type) -> Bool:
   doc: "equality with Dyn and bigLamType"
   cases(Type) t1:
@@ -709,6 +700,22 @@ fun get-type(ann :: A.Ann) -> TCST<Type>:
       end
     | a_dot(l, obj, field) => add-error(l, errAnnDotNotSupported(obj, field))^seq(return(dynType))
     | a_pred(l, ann1, _) => get-type(ann1)
+  end
+end
+
+# NOTE(dbp 2013-12-02): I may regret this... but since the ast needs anns, I need to convert from
+# types back to anns in inference.
+fun unget-type(type :: Type, l :: Loc) -> A.Ann:
+  cases(Type) type:
+    | dynType => A.a_blank
+    | anyType => A.a_any
+    | nameType(name) => A.a_name(l, name)
+    | anonType(record) => A.a_record(l, record.fields.map(fun(p): A.a_field(l, p.a, unget-type(p.b, l)) end))
+    | arrowType(args, ret, _) => A.a_arrow(l, args.map(unget-type(_, l)), unget-type(ret, l))
+    | methodType(_, _, _) => raise("unget-type: don't know how to turn method types into annotations: " + fmty(type) + " with loc " + torepr(l))
+    | appType(name, args) => A.a_app(l, A.a_name(l, name), args.map(unget-type(_, l)))
+    | bigLamType(_, _) => raise("unget-type: don't know how to turn bigLamType types into annotations: " + fmty(type) + " with loc " + torepr(l))
+
   end
 end
 
@@ -1301,35 +1308,37 @@ fun is-inferred-functions(ast :: A.Expr) -> TCST<List<Pair<String, Type>>>:
   fun find-is-pairs(name :: String, e :: A.Expr) -> TCST<List<Type>>:
     cases(A.Expr) e:
       | s_block(l, stmts) => sequence(stmts.map(find-is-pairs(name, _)))^bind(fun(ps): return(concat(ps)) end)
-      | s_check_test(_, op, l, r) =>
+      | s_check_test(_, op, _l, r) =>
         if op == "opis":
           # NOTE(dbp 2013-10-21): Really simple for now - only if it
           # is of form funname(args) is bar.
-          cases(A.Expr) l:
-            | s_app(l1, typarams, fn, args) =>
-              cases(A.Expr) fn:
-                | s_id(l2, fname) =>
-                  if fname == name:
-                    tc(r)^bind(fun(rightty):
-                        sequence(args.map(tc))^bind(fun(argsty):
-                              if list.any(is-bigLamType, argsty + [rightty]):
-                                # NOTE(dbp 2013-11-17): I do not thing we can use uninstantiated
-                                # arguments without losing the simplicity of our inference. All
-                                # straightforward instantiations seem like they can be used to break
-                                # things.
-                                return([])
-                              else:
-                                return([arrowType(argsty, rightty, moreRecord([]))])
-                              end
+          infer(_l)^bind(fun(l):
+              cases(A.Expr) l:
+                | s_app(l1, typarams, fn, args) =>
+                  cases(A.Expr) fn:
+                    | s_id(l2, fname) =>
+                      if fname == name:
+                        infer(r)^bind(tc)^bind(fun(rightty):
+                            sequence(args.map(tc))^bind(fun(argsty):
+                                if list.any(is-bigLamType, argsty + [rightty]):
+                                  # NOTE(dbp 2013-11-17): I do not thing we can use uninstantiated
+                                  # arguments without losing the simplicity of our inference. All
+                                  # straightforward instantiations seem like they can be used to break
+                                  # things.
+                                  return([])
+                                else:
+                                  return([arrowType(argsty, rightty, moreRecord([]))])
+                                end
+                              end)
                           end)
-                      end)
-                  else:
-                    return([])
+                      else:
+                        return([])
+                      end
+                    | else => return([])
                   end
                 | else => return([])
               end
-            | else => return([])
-          end
+            end)
         else:
           return([])
         end
@@ -2153,33 +2162,187 @@ end
 ################################################################################
 
 fun infer(ast :: A.Expr) -> TCST<A.Expr>:
-  cases(A.Expr) ast:
-    | s_block(l, stmts) => return(ast)
-    | s_user_block(l, block) => return(ast)
-    | s_var(l, name, val) => return(ast)
-    | s_let(l, name, val) => return(ast)
-    | s_assign(l, id, val) => return(ast)
-    | s_if_else(l, branches, elsebranch) => return(ast)
-    | s_try(l, body, id, _except) => return(ast)
-    | s_lam(l, ps, args, ann, doc, body, ck) => return(ast)
-    | s_method(l, args, ann, doc, body, ck) => return(ast)
-    | s_extend(l, super, fields) => return(ast)
-    | s_update(l, super, fields) => return(ast)
-    | s_obj(l, fields) => return(ast)
-    | s_app(l, typarams, fn, args) => return(ast)
-    | s_id(l, id) => return(ast)
-    | s_num(l, num) => return(ast)
-    | s_bool(l, bool) => return(ast)
-    | s_str(l, str) => return(ast)
-    | s_get_bang(l, obj, str) => return(ast)
-    | s_bracket(l, obj, field) => return(ast)
-    | s_colon_bracket(l, obj, field) => return(ast)
-    | s_datatype(l, name, params, variants, check) => return(ast)
-    | s_cases(l, type, val, branches) => return(ast)
-    | s_cases_else(l, type, val, branches, _else) => return(ast)
-    | s_list(l, values) => return(ast)
-    | else => raise("infer: no case matched for: " + torepr(ast))
-  end
+  get-type-bindings(ast)^bind(fun(newtypes):
+      add-types(newtypes,
+        get-bindings(ast)^bind(fun(bindings):
+            add-bindings(bindings,
+              cases(A.Expr) ast:
+                | s_block(l, stmts) =>
+                  sequence(stmts.map(infer))^bind(
+                    fun(stmts_):
+                      return(A.s_block(l, stmts_))
+                    end)
+                | s_user_block(l, block) => infer(block)^bind(fun(block_):
+                      return(A.s_user_block(block))
+                    end)
+                | s_var(l, name, val) =>
+                  infer(val)^bind(fun(val_): return(A.s_var(l, name, val_)) end)
+                | s_let(l, name, val) =>
+                  infer(val)^bind(fun(val_): return(A.s_let(l, name, val_)) end)
+                | s_assign(l, id, val) =>
+                  infer(val)^bind(fun(val_): return(A.s_assign(l, id, val_)) end)
+                | s_if_else(l, branches, elsebranch) =>
+                  sequence(branches.map(fun(b):
+                        infer(b.test)^bind(fun(bt):
+                            infer(b.body)^bind(fun(bb):
+                                return(A.s_if_branch(b.l, bt, bb))
+                              end)
+                          end)
+                      end))^bind(fun(branches_):
+                      infer(elsebranch)^bind(fun(elsebranch_):
+                          return(A.s_if_else(l, branches_, elsebranch_))
+                        end)
+                    end)
+                | s_try(l, body, id, _except) =>
+                  infer(body)^bind(fun(body_):
+                      infer(_except)^bind(fun(except_):
+                          return(A.s_try(l, body_, id, except_))
+                        end)
+                    end)
+                | s_lam(l, ps, _args, ann, doc, body, ck) =>
+                  infer(ck)^bind(fun(ck_):
+                      bind-params(ps,
+                        sequence(_args.map(fun(b): get-type(b.ann)^bind(fun(t):
+                                  return(pair(b.id, t))
+                              end) end))^
+                        bind(fun(args):
+                            add-bindings(args,
+                              infer(body)^bind(fun(body_):
+                                  return(A.s_lam(l, ps, _args, ann, doc, body_, ck_))
+                                end)
+                              )
+                          end)
+                        )
+                    end)
+                | s_method(l, args, ann, doc, body, ck) =>
+                  infer(body)^bind(fun(body_):
+                      infer(ck)^bind(fun(ck_):
+                          return(A.s_method(l, args, ann, doc, body_, ck_))
+                        end)
+                    end)
+                | s_extend(l, super, fields) =>
+                  infer(super)^bind(fun(super_):
+                      sequence(fields.map(fun(f):
+                            infer(f.value)^bind(fun(fv):
+                                return(A.s_data_field(f.l, f.name, fv))
+                              end)
+                          end))^bind(fun(fields_):
+                          return(A.s_extend(l, super_, fields_))
+                        end)
+                    end)
+                | s_update(l, super, fields) =>
+                  infer(super)^bind(fun(super_):
+                      sequence(fields.map(fun(f):
+                            infer(f.value)^bind(fun(fv):
+                                return(A.s_data_field(f.l, f.name, fv))
+                              end)
+                          end))^bind(fun(fields_):
+                          return(A.s_update(l, super_, fields_))
+                        end)
+                    end)
+                | s_obj(l, fields) =>
+                  sequence(fields.map(fun(f):
+                            infer(f.value)^bind(fun(fv):
+                            return(A.s_data_field(f.l, f.name, fv))
+                          end)
+                      end))^bind(fun(fields_):
+                      return(A.s_obj(l, fields_))
+                    end)
+                | s_app(l, typarams, fn, args) =>
+                  tc(fn)^bind(fun(fn-ty):
+                      if is-bigLamType(fn-ty) and is-arrowType(fn-ty.type) and (typarams.length() == 0):
+                        sequence(args.map(tc))^bind(fun(arg-vals):
+                            renamed-arg-vals = rename-params(fn-ty.params, arg-vals, arg-vals).types
+                            cases(TySolveRes) tysolve(fn-ty.params, zip2(fn-ty.type.args, renamed-arg-vals), fn-ty.params.map(nmty)):
+                              | allSolved(vs) =>
+                                return(A.s_app(l, vs.map(unget-type(_, l)), fn, args))
+                              | someSolved(vs) =>
+                                add-warning(l, wmsg(warnInferredTypeParametersIncomplete(vs)))
+                                ^seq(return(A.s_app(l, vs.map(unget-type(_, l)), fn, args)))
+                              | incompatible =>
+                                add-error(l, msg(errFunctionArgumentsIncompatible(fn-ty, arg-vals)))^seq(
+                                  return(A.s_app(l, fn-ty.params.map(fun(_): dynType end).map(unget-type(_, l)), fn, args)))
+                            end
+                          end)
+                      else:
+                        return(ast)
+                      end
+                    end)
+                | s_id(l, id) => return(ast)
+                | s_num(l, num) => return(ast)
+                | s_bool(l, bool) => return(ast)
+                | s_str(l, str) => return(ast)
+                | s_get_bang(l, obj, str) =>
+                  infer(obj)^bind(fun(obj_): return(A.s_get_bang(l, obj_, str)) end)
+                | s_bracket(l, obj, field) =>
+                  infer(obj)^bind(fun(obj_):
+                      infer(field)^bind(fun(field_):
+                          return(A.s_bracket(l, obj_, field_))
+                        end)
+                    end)
+                | s_colon_bracket(l, obj, field) =>
+                  infer(obj)^bind(fun(obj_):
+                      infer(field)^bind(fun(field_):
+                          return(A.s_bracket(l, obj_, field_))
+                        end)
+                    end)
+                | s_datatype(l, name, params, variants, ck) =>
+                  infer(ck)^bind(fun(check_):
+                      sequence(variants.map(fun(v):
+                            cases(A.Variant) v:
+                              | s_datatype_variant(l1, name1, members, constructor) =>
+                                infer(constructor.body)^bind(fun(cb):
+                                    return(A.s_datatype_variant(l1, name1, members,
+                                        A.s_datatype_constructor(
+                                          constructor.l,
+                                          constructor.self,
+                                          cb
+                                          )))
+                                  end)
+                              | s_datatype_singleton_variant(l1, name1, constructor) =>
+                                infer(constructor.body)^bind(fun(cb):
+                                    return(A.s_datatype_singleton_variant(l1, name1,
+                                        A.s_datatype_constructor(
+                                          constructor.l,
+                                          constructor.self,
+                                          cb
+                                          )))
+                                  end)
+                            end
+                          end))^bind(fun(variants_):
+                          return(A.s_datatype(l, name, params, variants_, check_))
+                        end)
+                    end)
+                | s_cases(l, type, val, branches) =>
+                  infer(val)^bind(fun(val_):
+                      sequence(branches.map(fun(b):
+                            infer(b.body)^bind(fun(bb):
+                                return(A.s_cases_branch(b.l, b.name, b.args, bb))
+                              end)
+                          end))^bind(fun(branches_):
+                          return(A.s_cases(l, type, val_, branches_))
+                        end)
+                    end)
+                | s_cases_else(l, type, val, branches, _else) =>
+                  infer(_else)^bind(fun(else_):
+                      infer(val)^bind(fun(val_):
+                          sequence(branches.map(fun(b):
+                                infer(b.body)^bind(fun(bb):
+                                    return(A.s_cases_branch(b.l, b.name, b.args, bb))
+                                  end)
+                              end))^bind(fun(branches_):
+                              return(A.s_cases_else(l, type, val_, branches_, else_))
+                            end)
+                        end)
+                    end)
+                | s_list(l, values) =>
+                  sequence(values.map(infer))^bind(fun(values_): return(A.s_list(l, values_)) end)
+                | else => raise("infer: no case matched for: " + torepr(ast))
+              end
+              )
+          end)
+        )
+    end)
 end
 
 
@@ -2199,9 +2362,11 @@ fun tc-let(l :: Loc, name :: A.Bind, val :: A.Expr) -> TCST<Type>:
             | none =>
               tc(val)^bind(fun(ty):
                   subtype(l, ty, bindty)^bind(fun(st):
-                      if (not st) and (not tycompat(ty, bindty)):
+                      if not st:
                         add-error(l, msg(errAssignWrongType(name.id, fmty(bindty), fmty(ty))))^seq(
                           return(dynType))
+                      else if (ty <> bindty) and (bindty <> dynType):
+                        add-warning(l, wmsg(warnBindingDyn(name.id, bindty)))^seq(return(bindty))
                       else:
                         return(ty)
                       end
@@ -2274,7 +2439,22 @@ fun tc-lam(l :: Loc, ps :: List<String>, args :: List<Pair<String,Type>>, ret-ty
     )
 end
 
-fun tc-app(l :: Loc, typarams :: List<A.Ann>, fn :: A.Expr, args :: List<A.Expr>) -> TCST<Type>:
+fun tc-app(l :: Loc, params-inst :: List<A.Ann>, fn :: A.Expr, args :: List<A.Expr>) -> TCST<Type>:
+  fun tc-args(args_ :: List<A.Expr>, arg-types :: List<Type>, ret-type :: Type) -> TCST<Type>:
+    sequence(args_.map(tc))^bind(fun(arg-vals):
+        (for foldm(base from pair(1, ret-type), ap from zip2(arg-types, arg-vals)):
+            subtype(l, ap.b, ap.a)^bind(fun(res):
+                if not res:
+                  add-error(l,
+                    msg(errArgumentBadType(base.a, fmty(ap.a), fmty(ap.b))))
+                  ^seq(return(pair(base.a + 1, dynType)))
+                else:
+                  return(pair(base.a + 1, base.b))
+                end
+              end)
+          end)^bind(fun(p): return(p.b) end)
+      end)
+  end
   tc(fn)^bind(fun(fn-ty):
       cases(Type) fn-ty:
         | arrowType(arg-types, ret-type, rec-type) =>
@@ -2283,18 +2463,7 @@ fun tc-app(l :: Loc, typarams :: List<A.Ann>, fn :: A.Expr, args :: List<A.Expr>
               msg(errArityMismatch(arg-types.length(), args.length())))^seq(
               return(dynType))
           else:
-            sequence(args.map(tc))^bind(fun(arg-vals):
-                (for foldm(base from pair(1, ret-type), ap from zip2(arg-types, arg-vals)):
-                    subtype(l, ap.b, ap.a)^bind(fun(res):
-                        if not res:
-                          add-error(l,
-                            msg(errArgumentBadType(base.a, fmty(ap.a), fmty(ap.b))))^seq(return(pair(base.a + 1, dynType)))
-                        else:
-                          return(pair(base.a + 1, base.b))
-                        end
-                      end)
-                  end)^bind(fun(p): return(p.b) end)
-              end)
+            tc-args(args, arg-types, ret-type)
           end
         | bigLamType(params, ty1) =>
           cases(Type) ty1:
@@ -2303,16 +2472,14 @@ fun tc-app(l :: Loc, typarams :: List<A.Ann>, fn :: A.Expr, args :: List<A.Expr>
                 add-error(l,
                   msg(errArityMismatch(arg-types.length(), args.length())))^seq(
                   return(dynType))
+              else if params.length() <> params-inst.length():
+                add-error(l,
+                  msg(errParamArityMismatch(params.length(), params-inst.length())))^seq(
+                  return(dynType))
               else:
-                sequence(args.map(tc))^bind(fun(arg-vals):
-                    cases(TySolveRes) tysolve(params, zip2(arg-types, arg-vals), [ret-type]):
-                      | allSolved(vs) => return(vs.first)
-                      | someSolved(vs) =>
-                        # NOTE(dbp 2013-11-09): Add warning - ret type has dynType due to underspecification
-                        return(vs.first)
-                      | incompatible =>
-                        add-error(l, msg(errFunctionArgumentsIncompatible(fmty(ty1), arg-vals.map(fmty))))^seq(return(dynType))
-                    end
+                sequence(params-inst.map(get-type))^bind(fun(params-inst-tys):
+                    add-types(zip2(params.map(nmty), params-inst-tys.map(typeAlias)),
+                      tc-args(args, arg-types, ret-type))
                   end)
               end
             | dynType => return(dynType)
@@ -2330,7 +2497,7 @@ end
 fun tc-if(l, branches, elsebranch) -> TCST<Type>:
   sequence(branches.map(fun(branch):
         tc(branch.test)^bind(fun(ty):
-            if tycompat(nmty("Bool"), ty):
+            if tydyneq(nmty("Bool"), ty):
               return(nothing)
             else:
               add-error(branch.l, msg(errIfTestNotBool(fmty(ty))))
@@ -2373,6 +2540,7 @@ fun tc-bracket(l :: Loc, obj :: A.Expr, field :: A.Expr) -> TCST<Type>:
             end
         end
       end
+
       var loop-point = nothing
       fun record-type-lookup(type):
         get-type-env()^bind(fun(type-env):
@@ -2442,8 +2610,8 @@ fun tc-bracket(l :: Loc, obj :: A.Expr, field :: A.Expr) -> TCST<Type>:
 end
 
 fun tc-cases(l :: Loc, _type :: A.Ann, val :: A.Expr, branches :: List<A.CasesBranch>) -> TCST<Type>:
-  fun branch-check(params :: List<String>, base :: Type, variant :: Type, branch :: A.CasesBranch) -> TCST<Type>:
-    if is-incompatible(tysolve(params, [pair(base, variant)], [])):
+  fun branch-check(base :: Type, variant :: Type, branch :: A.CasesBranch) -> TCST<Type>:
+    if not tydyneq(base, variant):
       add-error(branch.l,
         msg(errCasesBranchInvalidVariant(fmty(base), branch.name, fmty(variant)))
         )^seq(return(dynType))
@@ -2453,9 +2621,12 @@ fun tc-cases(l :: Loc, _type :: A.Ann, val :: A.Expr, branches :: List<A.CasesBr
   end
   get-type(_type)^bind(
     fun(type):
+      when is-bigLamType(type):
+        raise("tc-cases: encountered uninstantiated type in type position, which means there is a bug in infer.")
+      end
       tc(val)^bind(
         fun(val-ty):
-          if not tycompat(type, val-ty):
+          if not tydyneq(type, val-ty):
             add-error(l,
               msg(errCasesValueBadType(fmty(type), fmty(val-ty)))
               )^seq(return(dynType))
@@ -2482,7 +2653,7 @@ fun tc-cases(l :: Loc, _type :: A.Ann, val :: A.Expr, branches :: List<A.CasesBr
                                         argty from args):
                                       pair(bnd.id, argty)
                                     end,
-                                    branch-check([], type, ret, branch))
+                                    branch-check(type, ret, branch))
                                 end
                               | nameType(_) =>
                                 if branch.args.length() <> 0:
@@ -2490,7 +2661,7 @@ fun tc-cases(l :: Loc, _type :: A.Ann, val :: A.Expr, branches :: List<A.CasesBr
                                     msg(errCasesPatternNumberFields(branch.name, 0, branch.args.length()))
                                     )^seq(return(dynType))
                                 else:
-                                  branch-check([], type, ty, branch)
+                                  branch-check(type, ty, branch)
                                 end
                               | appType(_,_) =>
                                 if branch.args.length() <> 0:
@@ -2498,49 +2669,52 @@ fun tc-cases(l :: Loc, _type :: A.Ann, val :: A.Expr, branches :: List<A.CasesBr
                                     msg(errCasesPatternNumberFields(branch.name, 0, branch.args.length()))
                                     )^seq(return(dynType))
                                 else:
-                                  branch-check([], type, ty, branch)
+                                  branch-check(type, ty, branch)
                                 end
                               | bigLamType(params, ty1) =>
-                                cases(Type) ty1:
-                                  | arrowType(args, ret, rec) =>
-                                    # rename any params that appear in type. this needs to happen in ret and args.
-                                    cases(RenameRes) rename-params(params, [type], [arrowType(args, ret, moreRecord([]))]):
-                                      | renameRes(new-params, new-types) =>
-                                        new-arr = new-types.first
-                                        solved = tysolve(new-params, [pair(new-arr.ret, type)], new-arr.args)
-                                        cases(TySolveRes) solved:
-                                          | incompatible =>
-                                            add-error(branch.l,
-                                              msg(errCasesBranchInvalidVariant(fmty(type), branch.name, fmty(ty)))
-                                              )^seq(return(dynType))
-                                          | else =>
-                                            add-bindings(for map2(bnd from branch.args,
-                                                  argty from solved.l):
-                                                pair(bnd.id, argty)
-                                              end,
-                                              tc(branch.body))
+                                if (not is-appType(type)) or (type.args.length() <> params.length):
+                                  add-error(branch.l,
+                                    msg(errCasesBranchInvalidVariant(fmty(type), branch.name, fmty(ty))))^seq(return(dynType))
+                                else:
+                                    cases(Type) ty1:
+                                      | arrowType(args, ret, rec) =>
+                                        sequence(type.args.map(get-type))^bind(fun(params-inst):
+                                            add-types(zip2(params,params-inst.map(typeAlias)),
+                                              # rename any params that appear in type. this needs to happen in ret and args.
+                                              cases(RenameRes) rename-params(params, [type], [ty1]):
+                                                | renameRes(new-params, new-types) =>
+                                                  new-arr = new-types.first
+                                                  add-bindings(zip2(branch.args, new-arr.args),
+                                                    tc(branch.body))
+                                              end)
+                                          end)
+                                      | nameType(_) =>
+                                        if branch.args.length() <> 0:
+                                          add-error(branch.l,
+                                            msg(errCasesPatternNumberFields(branch.name, 0, branch.args.length()))
+                                            )^seq(return(dynType))
+                                        else:
+                                          sequence(type.args.map(get-type))^bind(fun(params-inst):
+                                              add-types(zip2(params,params-inst.map(typeAlias)),
+                                                branch-check(type, ty1, branch))
+                                            end)
                                         end
+                                      | appType(_, _) =>
+                                        if branch.args.length() <> 0:
+                                          add-error(branch.l,
+                                            msg(errCasesPatternNumberFields(branch.name, 0, branch.args.length()))
+                                            )^seq(return(dynType))
+                                        else:
+                                           sequence(type.args.map(get-type))^bind(fun(params-inst):
+                                              add-types(zip2(params,params-inst.map(typeAlias)),
+                                                branch-check(type, ty1, branch))
+                                            end)
+                                        end
+                                      | else =>
+                                        add-error(branch.l,
+                                          msg(errCasesBranchInvalidVariant(fmty(type), branch.name, fmty(ty)))
+                                          )^seq(return(dynType))
                                     end
-                                  | nameType(_) =>
-                                    if branch.args.length() <> 0:
-                                      add-error(branch.l,
-                                        msg(errCasesPatternNumberFields(branch.name, 0, branch.args.length()))
-                                        )^seq(return(dynType))
-                                    else:
-                                      branch-check(params, type, ty1, branch)
-                                    end
-                                  | appType(_, _) =>
-                                    if branch.args.length() <> 0:
-                                      add-error(branch.l,
-                                        msg(errCasesPatternNumberFields(branch.name, 0, branch.args.length()))
-                                        )^seq(return(dynType))
-                                    else:
-                                      branch-check(params, type, ty1, branch)
-                                    end
-                                  | else =>
-                                    add-error(branch.l,
-                                      msg(errCasesBranchInvalidVariant(fmty(type), branch.name, fmty(ty)))
-                                      )^seq(return(dynType))
                                 end
                               | else =>
                                 add-error(branch.l,
@@ -2623,7 +2797,8 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                     end)^bind(fun(record):
                       return(anonType(record))
                     end)
-                | s_app(l, params, fn, args) => tc-app(l, params, fn, args)
+                | s_app(l, params, fn, args) =>
+                  tc-app(l, params, fn, args)
                 | s_id(l, id) =>
                   get-env()^bind(fun(env):
                       cases(option.Option) map-get(env, id):
@@ -2637,7 +2812,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                 | s_get_bang(l, obj, str) => return(dynType)
                 | s_bracket(l, obj, field) => tc-bracket(l, obj, field)
                 | s_colon_bracket(l, obj, field) => return(dynType)
-                | s_datatype(l, name, params, variants, check) =>
+                | s_datatype(l, name, params, variants, ck) =>
                   # NOTE(dbp 2013-10-30): Should statements have type nothing?
                   return(nmty("Nothing"))
                 | s_cases(l, type, val, branches) => tc-cases(l, type, val, branches)
@@ -2650,7 +2825,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                   # NOTE(dbp 2013-11-16): I don't want to re-implement all the logic that
                   # makes desugared lists work, so I'm just going to manually desugar and
                   # then typecheck.
-                  tc(values.foldr(fun(v, rst): A.s_app(l, [], A.s_id(l, "link"), [v, rst]) end, A.s_id(l, "empty")))
+                  infer(values.foldr(fun(v, rst): A.s_app(l, [], A.s_id(l, "link"), [v, rst]) end, A.s_id(l, "empty")))^bind(tc)
                 | else => raise("tc: no case matched for: " + torepr(ast))
               end
               )
