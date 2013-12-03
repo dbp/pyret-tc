@@ -2,4 +2,4 @@
 
 #==
 
-x :: List<Number> = [1,2,3].partition(fun(x :: Number): x < 2 end).is-true
+x :: List<Number> = [1,2,3].partition(fun(y :: Number): y < 2 end).is-true

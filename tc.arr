@@ -2192,6 +2192,72 @@ fun infer-let(const, l :: Loc, bnd :: A.Bind, val_ :: A.Expr) -> TCST<A.Expr>:
     end)
 end
 
+fun infer-app(l :: Loc, fn :: A.Expr, args :: List<A.Expr>) -> TCST<A.Expr>:
+  tc(fn)^bind(fun(fn-ty):
+      if is-bigLamType(fn-ty) and is-arrowType(fn-ty.type):
+        sequence(args.map(tc))^bind(fun(arg-vals):
+            renamed-arg-vals = rename-params(fn-ty.params, arg-vals, arg-vals).types
+            fun arg-inst(params, stx, vty, _aty):
+              doc: "wrap stx in s_instantiate if needed"
+              if is-bigLamType(vty):
+                aty = for fold(b from _aty, p from zip2(params, fn-ty.params)):
+                  replace(nmty(p.b), p.a, b)
+                end
+                cases(TySolveRes) tysolve(vty.params, [pair(vty.type, aty)], vty.params.map(nmty)):
+                  | allSolved(vs) =>
+                    return(A.s_instantiate(stx.l, stx, vs.map(unget-type(_, stx.l))))
+                  | someSolved(vs) =>
+                    add-warning(l, wmsg(warnInferredTypeParametersIncomplete(vs)))
+                    ^seq(
+                      return(A.s_instantiate(stx.l, stx, vs.map(unget-type(_, stx.l)))))
+                  | incompatible =>
+                    raise("infer: an arg could not be unified with its type, even when all the args unified, which means there is a bug in the type checker, as this shouldn't be able to happen.")
+                end
+              else:
+                return(stx)
+              end
+            end
+            cases(TySolveRes) tysolve(
+                  fn-ty.params,
+                  zip2(fn-ty.type.args, renamed-arg-vals),
+                  fn-ty.params.map(nmty)):
+              | allSolved(vs) =>
+                sequence(map3(
+                    arg-inst(vs,_,_,_),
+                    args,
+                    renamed-arg-vals,
+                    fn-ty.type.args))^bind(fun(args-instantiated):
+                    return(A.s_app(l, A.s_instantiate(l, fn,
+                          vs.map(unget-type(_, l))),
+                        args-instantiated))
+                  end)
+              | someSolved(vs) =>
+                add-warning(l, wmsg(warnInferredTypeParametersIncomplete(vs)))
+                ^seq(
+                  sequence(map3(
+                      arg-inst(vs,_,_,_),
+                      args,
+                      renamed-arg-vals,
+                      fn-ty.type.args))^bind(fun(args-instantiated):
+                      return(A.s_app(l,
+                          A.s_instantiate(l,
+                            fn,
+                            vs.map(unget-type(_, l))),
+                          args-instantiated))
+                    end))
+              | incompatible =>
+                add-error(l, msg(errFunctionArgumentsIncompatible(fn-ty, arg-vals)))^seq(
+                  return(A.s_app(l, A.s_instantiate(l, fn,
+                        fn-ty.params.map(fun(_): dynType end).map(unget-type(_, l))),
+                      args)))
+            end
+          end)
+      else:
+        return(ast)
+      end
+    end)
+end
+
 
 fun infer(ast :: A.Expr) -> TCST<A.Expr>:
   get-type-bindings(ast)^bind(fun(newtypes):
@@ -2285,69 +2351,7 @@ fun infer(ast :: A.Expr) -> TCST<A.Expr>:
                       return(A.s_obj(l, fields_))
                     end)
                 | s_app(l, fn, args) =>
-                  tc(fn)^bind(fun(fn-ty):
-                      if is-bigLamType(fn-ty) and is-arrowType(fn-ty.type):
-                        sequence(args.map(tc))^bind(fun(arg-vals):
-                            renamed-arg-vals = rename-params(fn-ty.params, arg-vals, arg-vals).types
-                            fun arg-inst(params, stx, vty, _aty):
-                              doc: "wrap stx in s_instantiate if needed"
-                              if is-bigLamType(vty):
-                                aty = for fold(b from _aty, p from zip2(params, fn-ty.params)):
-                                    replace(nmty(p.b), p.a, b)
-                                end
-                                cases(TySolveRes) tysolve(vty.params, [pair(vty.type, aty)], vty.params.map(nmty)):
-                                  | allSolved(vs) =>
-                                    return(A.s_instantiate(stx.l, stx, vs.map(unget-type(_, stx.l))))
-                                  | someSolved(vs) =>
-                                    add-warning(l, wmsg(warnInferredTypeParametersIncomplete(vs)))
-                                    ^seq(
-                                      return(A.s_instantiate(stx.l, stx, vs.map(unget-type(_, stx.l)))))
-                                  | incompatible =>
-                                    raise("infer: an arg could not be unified with its type, even when all the args unified, which means there is a bug in the type checker, as this shouldn't be able to happen.")
-                                end
-                              else:
-                                return(stx)
-                              end
-                            end
-                            cases(TySolveRes) tysolve(
-                                  fn-ty.params,
-                                  zip2(fn-ty.type.args, renamed-arg-vals),
-                                  fn-ty.params.map(nmty)):
-                              | allSolved(vs) =>
-                                sequence(map3(
-                                    arg-inst(vs,_,_,_),
-                                    args,
-                                    renamed-arg-vals,
-                                    fn-ty.type.args))^bind(fun(args-instantiated):
-                                return(A.s_app(l, A.s_instantiate(l, fn,
-                                      vs.map(unget-type(_, l))),
-                                        args-instantiated))
-                                  end)
-                              | someSolved(vs) =>
-                                add-warning(l, wmsg(warnInferredTypeParametersIncomplete(vs)))
-                                ^seq(
-                                  sequence(map3(
-                                      arg-inst(vs,_,_,_),
-                                      args,
-                                      renamed-arg-vals,
-                                      fn-ty.type.args))^bind(fun(args-instantiated):
-                                      return(A.s_app(l,
-                                          A.s_instantiate(l,
-                                            fn,
-                                            vs.map(unget-type(_, l))),
-                                          args-instantiated))
-                                    end))
-                              | incompatible =>
-                                add-error(l, msg(errFunctionArgumentsIncompatible(fn-ty, arg-vals)))^seq(
-                                  return(A.s_app(l, A.s_instantiate(l, fn,
-                                        fn-ty.params.map(fun(_): dynType end).map(unget-type(_, l))),
-                                       args)))
-                            end
-                          end)
-                      else:
-                        return(ast)
-                      end
-                    end)
+                    infer-app(l, fn, args)
                 | s_id(l, id) => return(ast)
                 | s_num(l, num) => return(ast)
                 | s_bool(l, bool) => return(ast)
