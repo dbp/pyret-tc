@@ -1124,7 +1124,7 @@ end
 data RenameRes:
   | renameRes(params :: List<String>, types :: List<Type>)
 end
-fun rename-params(_params, types-appear, types-rename):
+fun rename-params(_params :: List<String>, types-appear :: List<Type>, types-rename :: List<Type>):
   doc: "renames any params that appear in types-appear in types-rename"
   # this is a hack - we want a pool of free variables... Assuming enough of these
   # will be free.
@@ -2172,6 +2172,27 @@ end
 # Local type inference.                                                        #
 ################################################################################
 
+fun infer-let(const, l :: Loc, bnd :: A.Bind, val_ :: A.Expr) -> TCST<A.Expr>:
+  infer(val_)^bind(fun(val):
+      get-type(bnd.ann)^bind(fun(aty):
+          tc(val)^bind(fun(vty):
+              if is-bigLamType(vty):
+                rr = rename-params(vty.params, [aty], [vty.type])
+                cases(TySolveRes) tysolve(rr.params, [pair(rr.types.first, aty)], rr.params.map(nmty)):
+                  | allSolved(vs) =>
+                    return(const(l, bnd, A.s_instantiate(l, val, vs.map(unget-type(_, l)))))
+                  | else =>
+                    return(const(l, bnd, val))
+                end
+              else:
+                return(const(l, bnd, val))
+              end
+            end)
+        end)
+    end)
+end
+
+
 fun infer(ast :: A.Expr) -> TCST<A.Expr>:
   get-type-bindings(ast)^bind(fun(newtypes):
       add-types(newtypes,
@@ -2190,10 +2211,10 @@ fun infer(ast :: A.Expr) -> TCST<A.Expr>:
                   # NOTE(dbp 2013-12-03): this seems wrong. Want to infer deeper in expr,
                   # but not the top level, as we have explicit instantiation. Not sure how.
                   return(ast)
-                | s_var(l, name, val) =>
-                  infer(val)^bind(fun(val_): return(A.s_var(l, name, val_)) end)
-                | s_let(l, name, val) =>
-                  infer(val)^bind(fun(val_): return(A.s_let(l, name, val_)) end)
+                | s_var(l, bnd, val) =>
+                  infer-let(A.s_var, l, bnd, val)
+                | s_let(l, bnd, val) =>
+                  infer-let(A.s_let, l, bnd, val)
                 | s_assign(l, id, val) =>
                   infer(val)^bind(fun(val_): return(A.s_assign(l, id, val_)) end)
                 | s_if_else(l, branches, elsebranch) =>
@@ -2302,7 +2323,7 @@ fun infer(ast :: A.Expr) -> TCST<A.Expr>:
                                       vs.map(unget-type(_, l))),
                                         args-instantiated))
                                   end)
-                                | someSolved(vs) =>
+                              | someSolved(vs) =>
                                 add-warning(l, wmsg(warnInferredTypeParametersIncomplete(vs)))
                                 ^seq(
                                   sequence(map3(
