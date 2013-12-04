@@ -155,7 +155,7 @@ end
 
 # NOTE(dbp 2013-12-04): The following two used for checking cases().
 data DataDef:
-  | dataDef(params :: List<String>, constructors :: List<DataConstructor>)
+  | dataDef(name :: String, params :: List<String>, constructors :: List<DataConstructor>)
 end
 data DataConstructor:
   | dataConstructor(name :: String, args :: List<Type>)
@@ -363,6 +363,12 @@ check:
     add-bindings([pair("a", "T")], get-env()),
     [], [], [], [], [], []
     ) is [pair("a", "T")]
+  eval(
+    add-datatypes([pair("D", dataDef("D", [], []))], get-datatypes()),
+    [], [], [], [], [], []
+    ) is [pair("D", dataDef("D", [], []))]
+
+
 end
 
 
@@ -406,6 +412,12 @@ data TCError:
     end
   | errFieldNotFound(name) with: tostring(self):
       "Field " + self.name + " not present on object."
+    end
+  | errCasesInvalidType(given) with: tostring(self):
+      "Type in cases is not a valid datatype: " + fmty(self.given) + "."
+    end
+  | errCasesMalformedType(expected, given) with: tostring(self):
+      "Data type in cases expression is not well formed. Was " + fmty(self.given) + ", but should have been of form " + fmty(self.expected) + "."
     end
   | errCasesValueBadType(expected, given) with: tostring(self):
       "The value in cases expression should have type " + self.expected + ", but has incompatible type " + self.given + "."
@@ -528,6 +540,13 @@ where:
   concat([[1],[2,3,4],[]]) is [1,2,3,4]
   concat([]) is []
   concat([[],[],[1]]) is [1]
+end
+
+fun<T, U> chain(o :: Option<T>, f :: (T -> Option<U>)) -> Option<U>:
+  cases(Option<T>) o:
+    | none => none
+    | some(t) => f(t)
+  end
 end
 
 fun ordinalize(n :: Number) -> String:
@@ -1188,9 +1207,14 @@ fun get-bindings(ast :: A.Expr) -> TCST<Pair<List<Pair<String, Type>>, List<Pair
   cases(A.Expr) ast:
     | s_block(l, stmts) =>
       get-env()^bind(fun(start-env):
-          for foldm(cur from pair(start-env, []), stmt from stmts):
-            get-bindings(stmt)^bind(fun(new-binds): put-env(new-binds.a + cur.a)^seq(return(pair(new-binds.a + cur.a, cur.b + []))) end)
-          end
+          get-datatypes()^bind(fun(start-dt):
+              for foldm(cur from pair([], []), stmt from stmts):
+                get-bindings(stmt)^bind(fun(new-binds):
+                  put-env(new-binds.a + cur.a + start-env)
+                  ^seq(put-datatypes(new-binds.b + cur.b + start-dt))
+                  ^seq(return(pair(new-binds.a + cur.a, new-binds.b + cur.b))) end)
+              end
+            end)
         end)
     | s_user_block(l, block) => get-bindings(block)
       # NOTE(dbp 2013-10-16): Use the ann if it exists, otherwise the type of value.
@@ -1206,7 +1230,7 @@ fun get-bindings(ast :: A.Expr) -> TCST<Pair<List<Pair<String, Type>>, List<Pair
       bind-params(params,
         sequence(variants.map(get-variant-bindings(name, params, _)))^bind(fun(_vbs):
             vbs = unzip2(_vbs)
-            return(pair(vbs.a^concat() + [pair(name, params-wrap(params, arrowType([anyType], nmty("Bool"), moreRecord([]))))], [pair(name, dataDef(params, vbs.b))]))
+            return(pair(vbs.a^concat() + [pair(name, params-wrap(params, arrowType([anyType], nmty("Bool"), moreRecord([]))))], [pair(name, dataDef(name, params, vbs.b^concat()))]))
           end)
         )
     | else => return(pair([], []))
@@ -1978,8 +2002,8 @@ default-type-env = [
 ]
 
 default-datatypes = [
-  pair("List", dataDef(["T"], [dataConstructor("empty", []), dataConstructor("link", [nmty("T"), appty("List", ["T"])])])),
-  pair("Option", dataDef(["T"], [dataConstructor("none", []), dataConstructor("some", [nmty("T")])]))
+  pair("List", dataDef("List", ["T"], [dataConstructor("empty", []), dataConstructor("link", [nmty("T"), appty("List", ["T"])])])),
+  pair("Option", dataDef("Option", ["T"], [dataConstructor("none", []), dataConstructor("some", [nmty("T")])]))
 ]
 
 default-env = [
@@ -2701,129 +2725,85 @@ fun tc-bracket(l :: Loc, obj :: A.Expr, field :: A.Expr) -> TCST<Type>:
 end
 
 fun tc-cases(l :: Loc, _type :: A.Ann, val :: A.Expr, branches :: List<A.CasesBranch>) -> TCST<Type>:
-  fun branch-check(base :: Type, variant :: Type, branch :: A.CasesBranch) -> TCST<Type>:
-    if not tydyneq(base, variant):
-      add-error(branch.l,
-        msg(errCasesBranchInvalidVariant(fmty(base), branch.name, fmty(variant)))
-        )^seq(return(dynType))
-    else:
-      tc(branch.body)
-    end
-  end
   get-type(_type)^bind(
     fun(type):
       when is-bigLamType(type):
         raise("tc-cases: encountered uninstantiated type in type position, which means there is a bug in infer.")
       end
-      tc(val)^bind(
-        fun(val-ty):
-          if not tydyneq(type, val-ty):
-            add-error(l,
-              msg(errCasesValueBadType(fmty(type), fmty(val-ty)))
-              )^seq(return(dynType))
-          else:
-            get-env()^bind(
-              fun(env):
-                tc-branches(branches.map(fun(branch):
-                      if branch.name == "%else":
-                        tc(branch.body)
-                      else:
-                        cases(Option) map-get(env, branch.name):
-                          | none => add-error(branch.l,
-                              msg(errCasesBranchInvalidVariant(fmty(type), branch.name, "Unknown"))
-                              )^seq(return(dynType))
-                          | some(ty) =>
-                            cases(Type) ty:
-                              | arrowType(args, ret, rec) =>
-                                if args.length() <> branch.args.length():
-                                  add-error(branch.l,
-                                    msg(errCasesPatternNumberFields(branch.name, args.length(), branch.args.length()))
-                                    )^seq(return(dynType))
+      get-datatypes()^bind(fun(datatypes):
+          fun data-name(t :: Type) -> Option<String>:
+            cases(Type) t:
+              | nameType(n) => some(n)
+              | appType(n, _) => some(n)
+              | else => none
+            end
+          end
+          fun data-def-get(dd :: DataDef, name :: String) -> Option<List<Type>>:
+            cs = dd.constructors
+            cs.find(fun(c): c.name == name end)^chain(fun(c): some(c.args) end)
+          end
+          cases(Option) data-name(type)^chain(fun(name): map-get(datatypes, name) end):
+            | none =>
+              add-error(l, msg(errCasesInvalidType(type)))^seq(return(dynType))
+            | some(data-def) =>
+              if (data-def.params == []) and is-appType(type):
+                add-error(l, msg(errCasesMalformedType(nmty(data-def.name), type)))
+                ^seq(return(dynType))
+              else if (data-def.params <> []) and ((not is-appType(type)) or (data-def.params.length() <> type.args.length())):
+                  add-error(l, msg(errCasesMalformedType(appty(data-def.name, data-def.params), type)))
+                ^seq(return(dynType))
+              else:
+                tc(val)^bind(
+                  fun(val-ty):
+                    if not tydyneq(type, val-ty):
+                      add-error(l,
+                        msg(errCasesValueBadType(fmty(type), fmty(val-ty)))
+                        )^seq(return(dynType))
+                    else:
+                      get-env()^bind(
+                        fun(env):
+                          tc-branches(branches.map(fun(branch):
+                                if branch.name == "%else":
+                                  tc(branch.body)
                                 else:
-                                  add-bindings(for map2(bnd from branch.args,
-                                        argty from args):
-                                      pair(bnd.id, argty)
-                                    end,
-                                    branch-check(type, ret, branch))
-                                end
-                              | nameType(_) =>
-                                if branch.args.length() <> 0:
-                                  add-error(branch.l,
-                                    msg(errCasesPatternNumberFields(branch.name, 0, branch.args.length()))
-                                    )^seq(return(dynType))
-                                else:
-                                  branch-check(type, ty, branch)
-                                end
-                              | appType(_,_) =>
-                                if branch.args.length() <> 0:
-                                  add-error(branch.l,
-                                    msg(errCasesPatternNumberFields(branch.name, 0, branch.args.length()))
-                                    )^seq(return(dynType))
-                                else:
-                                  branch-check(type, ty, branch)
-                                end
-                              | bigLamType(params, ty1) =>
-                                if (not is-appType(type)) or (type.args.length() <> params.length):
-                                  add-error(branch.l,
-                                    msg(errCasesBranchInvalidVariant(fmty(type), branch.name, fmty(ty))))^seq(return(dynType))
-                                else:
-                                    cases(Type) ty1:
-                                      | arrowType(args, ret, rec) =>
-                                        sequence(type.args.map(get-type))^bind(fun(params-inst):
-                                            add-types(zip2(params,params-inst.map(typeAlias)),
-                                              # rename any params that appear in type. this needs to happen in ret and args.
-                                              cases(RenameRes) rename-params(params, [type], [ty1]):
-                                                | renameRes(new-params, new-types) =>
-                                                  new-arr = new-types.first
-                                                  add-bindings(zip2(branch.args, new-arr.args),
-                                                    tc(branch.body))
-                                              end)
-                                          end)
-                                      | nameType(_) =>
-                                        if branch.args.length() <> 0:
-                                          add-error(branch.l,
-                                            msg(errCasesPatternNumberFields(branch.name, 0, branch.args.length()))
-                                            )^seq(return(dynType))
-                                        else:
-                                          sequence(type.args.map(get-type))^bind(fun(params-inst):
-                                              add-types(zip2(params,params-inst.map(typeAlias)),
-                                                branch-check(type, ty1, branch))
-                                            end)
-                                        end
-                                      | appType(_, _) =>
-                                        if branch.args.length() <> 0:
-                                          add-error(branch.l,
-                                            msg(errCasesPatternNumberFields(branch.name, 0, branch.args.length()))
-                                            )^seq(return(dynType))
-                                        else:
-                                           sequence(type.args.map(get-type))^bind(fun(params-inst):
-                                              add-types(zip2(params,params-inst.map(typeAlias)),
-                                                branch-check(type, ty1, branch))
-                                            end)
-                                        end
-                                      | else =>
+                                  cases(Option) data-def-get(data-def, branch.name):
+                                    | none => add-error(branch.l,
+                                        msg(errCasesBranchInvalidVariant(fmty(type), branch.name, "Unknown"))
+                                        )^seq(return(dynType))
+                                    | some(args) =>
+                                      if args.length() <> branch.args.length():
                                         add-error(branch.l,
-                                          msg(errCasesBranchInvalidVariant(fmty(type), branch.name, fmty(ty)))
+                                          msg(errCasesPatternNumberFields(branch.name, args.length(), branch.args.length()))
                                           )^seq(return(dynType))
-                                    end
+                                      else:
+                                        argtys = if data-def.params <> []:
+                                          for fold(base from args, p from zip2(data-def.params, type.args)):
+                                            base.map(replace(nmty(p.a), p.b, _))
+                                          end
+                                        else:
+                                          args
+                                        end
+                                        add-bindings(for map2(bnd from branch.args,
+                                              argty from argtys):
+                                            pair(bnd.id, argty)
+                                          end,
+                                          tc(branch.body))
+                                      end
+                                  end
                                 end
-                              | else =>
-                                add-error(branch.l,
-                                  msg(errCasesBranchInvalidVariant(fmty(type), branch.name, fmty(ty)))
-                                  )^seq(return(dynType))
-                            end
-                        end
-                      end
-                    end))^bind(fun(branchres):
-                    cases(TCBranchRes) branchres:
-                      | branchIncompatible(tys) =>
-                        add-error(l,
-                          msg(errCasesBranchType(tys.map(fmty)))
-                          )^seq(return(dynType))
-                      | branchCompatible(ty) => return(ty)
+                              end))^bind(fun(branchres):
+                              cases(TCBranchRes) branchres:
+                                | branchIncompatible(tys) =>
+                                  add-error(l,
+                                    msg(errCasesBranchType(tys.map(fmty)))
+                                    )^seq(return(dynType))
+                                | branchCompatible(ty) => return(ty)
+                              end
+                            end)
+                        end)
                     end
                   end)
-              end)
+              end
           end
         end)
     end)
