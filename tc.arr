@@ -65,38 +65,7 @@
 # We infer types of functions based on 'where' blocks - anywhere we see
 # foo(a,...) is z, we try to figure out types for a... and z, and then use that
 # to figure out the type of foo. This is done so that later definitions can
-# benefit from inference on earlier ones. The algorithm for generalizing to
-# parametric types is the following:
-# Given a pair of lists of types (the args and return), we look at the first
-# two.  If any part of them does not match (so Number and String, but also
-# List<Number> and List<String>), we take that pair, construct a new type
-# variable, and replace the two wherever they appear matched through the rest
-# of the list of types. We then look for more mismatches and repeat until there
-# are none. Now we move to the next pair of types. This is the procedure to
-# generalize two types for the function - we can use that and the next
-# potential type and repeat.  As a concrete example, consider the following
-# three tests:
-# foo(10, 20) is 20
-# foo('foo', 'bar') is 'bar'
-# foo(30, true) is true
-# The algorithm would proceed as follows:
-# 10 and 'foo' don't match, and have types Number and String. So create new
-# type variable T and replace pairwise, yielding:
-# T, T -> T
-# T, T -> T
-# We now find no mismatches through the entire list, so this is our candidate
-# type.  Now we start with the next signature, and work off of this pair:
-# T, T -> T
-# Number, Bool -> Bool
-# The first don't match, so we create a new type variable U and replace
-# pairwise, to get:
-# U, T -> T
-# U, Bool -> Bool
-# Now the first argument matches, so work on the second. It doesn't match, so
-# create a new type variable V and replace pairwise:
-# U, V -> V
-# U, V -> V
-# And now we've (successfully) inferred a proper type for this function.
+# benefit from inference on earlier ones.
 #
 # Type Checking: This is mostly straightforward typechecking, with the usual
 # co/contravariance for subtyping with functions, making sure all branches of
@@ -184,6 +153,14 @@ data TypeBinding:
   | typeNominal(type :: Type)
 end
 
+# NOTE(dbp 2013-12-04): The following two used for checking cases().
+data DataDef:
+  | dataDef(params :: List<String>, constructors :: List<DataConstructor>)
+end
+data DataConstructor:
+  | dataConstructor(name :: String, args :: List<Type>)
+end
+
 # used in testing
 dummy-loc = loc("dummy-file", -1, -1)
 
@@ -199,6 +176,7 @@ data TCstate:
       errors :: List<TypeError>,
       warnings :: List<TypeWarning>,
       iifs :: List<Pair<String, Type>>,
+      datatypes :: List<Pair<String, DataDef>>,
       env :: List<Pair<String, Type>>,
       type-env :: List<Pair<String, TypeBinding>>
       )
@@ -210,12 +188,12 @@ TCST = Function
 
 # First the fundamental monad functions
 fun return(v):
-  fun(er,w,i,e,t): tcst(v,er,w,i,e,t) end
+  fun(er,w,i,dt,e,t): tcst(v,er,w,i,dt,e,t) end
 end
 fun bind(mv, mf):
-  fun(er,w,i,e,t):
-    p = mv(er,w,i,e,t)
-    mf(p.value)(p.errors,p.warnings,p.iifs,p.env,p.type-env)
+  fun(er,w,i,dt,e,t):
+    p = mv(er,w,i,dt,e,t)
+    mf(p.value)(p.errors,p.warnings,p.iifs,p.datatypes,p.env,p.type-env)
   end
 end
 fun seq(mv1, mv2):
@@ -241,79 +219,92 @@ end
 
 # After that, the state-related functions
 fun get-errors():
-  fun(er,w,i,e,t):
-    tcst(er,er,w,i,e,t)
+  fun(er,w,i,dt,e,t):
+    tcst(er,er,w,i,dt,e,t)
   end
 end
 fun get-warnings():
-  fun(er,w,i,e,t):
-    tcst(w,er,w,i,e,t)
+  fun(er,w,i,dt,e,t):
+    tcst(w,er,w,i,dt,e,t)
   end
 end
 fun get-iifs():
-  fun(er,w,i,e,t):
-    tcst(i,er,w,i,e,t)
+  fun(er,w,i,dt,e,t):
+    tcst(i,er,w,i,dt,e,t)
+  end
+end
+fun get-datatypes():
+  fun(er,w,i,dt,e,t):
+    tcst(dt,er,w,i,dt,e,t)
   end
 end
 fun get-env():
-  fun(er,w,i,e,t):
-    tcst(e,er,w,i,e,t)
+  fun(er,w,i,dt,e,t):
+    tcst(e,er,w,i,dt,e,t)
   end
 end
 fun get-type-env():
-  fun(er,w,i,e,t):
-    tcst(t,er,w,i,e,t)
+  fun(er,w,i,dt,e,t):
+    tcst(t,er,w,i,dt,e,t)
   end
 end
 fun put-errors(errors):
-  fun(er,w,i,e,t):
-    tcst(nothing,errors,w,i,e,t)
+  fun(er,w,i,dt,e,t):
+    tcst(nothing,errors,w,i,dt,e,t)
   end
 end
 fun put-warnings(warnings):
-  fun(er,w,i,e,t):
-    tcst(nothing,er,warnings,i,e,t)
+  fun(er,w,i,dt,e,t):
+    tcst(nothing,er,warnings,i,dt,e,t)
   end
 end
 fun put-iifs(iifs):
-  fun(er,w,i,e,t):
-    tcst(nothing,er,w,iifs,e,t)
+  fun(er,w,i,dt,e,t):
+    tcst(nothing,er,w,iifs,dt,e,t)
+  end
+end
+fun put-datatypes(datatypes):
+  fun(er,w,i,dt,e,t):
+    tcst(nothing,er,w,i,datatypes,e,t)
   end
 end
 fun put-env(env):
-  fun(er,w,i,e,t):
-    tcst(nothing,er,w,i,env,t)
+  fun(er,w,i,dt,e,t):
+    tcst(nothing,er,w,i,dt,env,t)
   end
 end
 fun put-type-env(type-env):
-  fun(er,w,i,e,t):
-    tcst(nothing,er,w,i,e,type-env)
+  fun(er,w,i,dt,e,t):
+    tcst(nothing,er,w,i,dt,e,type-env)
   end
 end
-fun run(st-prog, errs, warns, iifs, env, type-env):
-  st-prog(errs,warns,iifs,env,type-env)
+fun run(st-prog, errs, warns, iifs, datatypes, env, type-env):
+  st-prog(errs,warns,iifs,datatypes,env,type-env)
 end
-fun eval(st-prog, errs, warns, iifs, env, type-env):
-  st-prog(errs,warns,iifs,env,type-env).value
+fun eval(st-prog, errs, warns, iifs, datatypes, env, type-env):
+  st-prog(errs,warns,iifs,datatypes,env,type-env).value
 end
-fun exec-errors(st-prog, errs, warns, iifs, env, type-env):
-  st-prog(errs,warns,iifs,env,type-env).errors
+fun exec-errors(st-prog, errs, warns, iifs, datatypes, env, type-env):
+  st-prog(errs,warns,iifs,datatypes,env,type-env).errors
 end
-fun exec-warns(st-prog, errs, warns, iifs, env, type-env):
-  st-prog(errs,warns,iifs,env,type-env).warnings
+fun exec-warns(st-prog, errs, warns, iifs, datatypes, env, type-env):
+  st-prog(errs,warns,iifs,datatypes,env,type-env).warnings
 end
-fun exec-iifs(st-prog, errs, warns, iifs, env, type-env):
-  st-prog(errs,warns,iifs,env,type-env).iifs
+fun exec-iifs(st-prog, errs, warns, iifs, datatypes, env, type-env):
+  st-prog(errs,warns,iifs,datatypes,env,type-env).iifs
 end
-fun exec-env(st-prog, errs, warns, iifs, env, type-env):
-  st-prog(errs,warns,iifs,env,type-env).type-env
+fun exec-datatypes(st-prog, errs, warns, iifs, datatypes, env, type-env):
+  st-prog(errs,warns,iifs,datatypes,env,type-env).datatypes
 end
-fun exec-type-env(st-prog, errs, warns, iifs, env, type-env):
-  st-prog(errs,warns,iifs,env,type-env).type-env
+fun exec-env(st-prog, errs, warns, iifs, datatypes, env, type-env):
+  st-prog(errs,warns,iifs,datatypes,env,type-env).type-env
+end
+fun exec-type-env(st-prog, errs, warns, iifs, datatypes, env, type-env):
+  st-prog(errs,warns,iifs,datatypes,env,type-env).type-env
 end
 
 # And finally, application specific actions (note that errors are
-# threaded, binds and types are not.)
+# threaded, binds, datatypes, and types are not.)
 fun add-error(l,e):
   doc: "adds an error to the threaded state"
   get-errors()^bind(fun(errors): put-errors(errors + [pair(l,e)]) end)
@@ -328,6 +319,15 @@ fun add-bindings(binds, mv):
       put-env(binds + old-env)^seq(
         mv^bind(fun(val):
             put-env(old-env)^seq(
+              return(val))
+          end))
+    end)
+end
+fun add-datatypes(datatypes, mv):
+  get-datatypes()^bind(fun(old-dt):
+      put-datatypes(datatypes + old-dt)^seq(
+        mv^bind(fun(val):
+            put-datatypes(old-dt)^seq(
               return(val))
           end))
     end)
@@ -348,20 +348,20 @@ check:
   eval(
     add-error("l1", "error 1")^seq(add-error("l2", "error 2"))
       ^seq(return("hello")),
-    [], [], [], [], []
+    [], [], [], [], [], []
     ) is "hello"
   exec-errors(
     add-error("l1", "error 1")^seq(add-error("l2", "error 2"))
       ^seq(return("hello")),
-    [], [], [], [], []
+    [], [], [], [], [], []
     ) is [pair("l1","error 1"), pair("l2","error 2")]
   exec-env(
     add-bindings([pair("a", "T")], get-env()),
-    [], [], [], [], []
+    [], [], [], [], [], []
     ) is []
   eval(
     add-bindings([pair("a", "T")], get-env()),
-    [], [], [], [], []
+    [], [], [], [], [], []
     ) is [pair("a", "T")]
 end
 
@@ -1161,7 +1161,7 @@ fun bind-params(params, mv) -> TCST:
       end), mv)
 end
 
-fun get-bindings(ast :: A.Expr) -> TCST<List<Pair<String, Type>>>:
+fun get-bindings(ast :: A.Expr) -> TCST<Pair<List<Pair<String, Type>>, List<Pair<String, DataDef>>>>:
   doc: "This function implements letrec behavior."
   fun name-val-binds(name, val):
     if A.is-a_blank(name.ann):
@@ -1170,7 +1170,7 @@ fun get-bindings(ast :: A.Expr) -> TCST<List<Pair<String, Type>>>:
           bind-params(ps,
             sequence(args.map(fun(b): get-type(b.ann) end))^bind(fun(arg-tys):
                 get-type(ann)^bind(fun(ret-ty):
-                    return([pair(name.id, params-wrap(ps, arrowType(arg-tys, ret-ty, moreRecord([]))))])
+                    return(pair([pair(name.id, params-wrap(ps, arrowType(arg-tys, ret-ty, moreRecord([]))))], []))
                   end)
               end)
             )
@@ -1179,17 +1179,17 @@ fun get-bindings(ast :: A.Expr) -> TCST<List<Pair<String, Type>>>:
           # it if it is something simple (like a number, string, application),
           # but not if it can have things like functions in it.
           add-bindings([pair(name.id, dynType)],
-            tc(val)^bind(fun(ty): return([pair(name.id, ty)]) end))
+            tc(val)^bind(fun(ty): return(pair([pair(name.id, ty)], [])) end))
       end
     else:
-      get-type(name.ann)^bind(fun(ty): return([pair(name.id, ty)]) end)
+      get-type(name.ann)^bind(fun(ty): return(pair([pair(name.id, ty)], [])) end)
     end
   end
   cases(A.Expr) ast:
     | s_block(l, stmts) =>
       get-env()^bind(fun(start-env):
-          for foldm(cur from start-env, stmt from stmts):
-            get-bindings(stmt)^bind(fun(new-binds): put-env(new-binds + cur)^seq(return(new-binds + cur)) end)
+          for foldm(cur from pair(start-env, []), stmt from stmts):
+            get-bindings(stmt)^bind(fun(new-binds): put-env(new-binds.a + cur.a)^seq(return(pair(new-binds.a + cur.a, cur.b + []))) end)
           end
         end)
     | s_user_block(l, block) => get-bindings(block)
@@ -1204,26 +1204,26 @@ fun get-bindings(ast :: A.Expr) -> TCST<List<Pair<String, Type>>>:
     #     )
     | s_datatype(l, name, params, variants, _) =>
       bind-params(params,
-        sequence(variants.map(get-variant-bindings(name, params, _)))^bind(fun(vbs):
-            return(vbs^concat() + [pair(name, params-wrap(params, arrowType([anyType], nmty("Bool"), moreRecord([]))))])
+        sequence(variants.map(get-variant-bindings(name, params, _)))^bind(fun(_vbs):
+            vbs = unzip2(_vbs)
+            return(pair(vbs.a^concat() + [pair(name, params-wrap(params, arrowType([anyType], nmty("Bool"), moreRecord([]))))], [pair(name, dataDef(params, vbs.b))]))
           end)
         )
-    | else => return([])
+    | else => return(pair([], []))
   end
 where:
   fun gb-src(src):
-    eval(get-bindings(A.parse(src,"anonymous-file", { ["check"]: false}).with-types.block), [], [], [], [], default-type-env)
+    eval(get-bindings(A.parse(src,"anonymous-file", { ["check"]: false}).with-types.block), [], [], [], [], [], default-type-env)
   end
-  gb-src("x = 2") is [pair("x", nmty("Number"))]
-  gb-src("x = 2 y = x") is [ pair("y", nmty("Number")),
-                             pair("x", nmty("Number"))
-                           ]
+  gb-src("x = 2") is pair([pair("x", nmty("Number"))], [])
+  gb-src("x = 2 y = x") is pair([ pair("y", nmty("Number")),
+      pair("x", nmty("Number"))], [])
 end
 
 fun get-variant-bindings(tname :: String, tparams :: List<String>, variant :: A.Variant(fun(v):
                                      A.is-s_datatype_variant(v) or
                                      A.is-s_datatype_singleton_variant(v) end)) ->
-    TCST<List<Pair<String, Type>>>:
+    TCST<Pair<List<Pair<String, Type>>>, List<DataConstructor>>:
   bigty = if tparams == []: nmty(tname) else: appty(tname, tparams) end
   boolty = nmty("Bool")
   fun get-member-type(m): get-type(m.bind.ann) end
@@ -1232,12 +1232,14 @@ fun get-variant-bindings(tname :: String, tparams :: List<String>, variant :: A.
       # Without that, we can't typecheck methods of user defined datatypes.
     | s_datatype_variant(l, vname, members, constr) =>
       sequence(members.map(get-member-type))^bind(fun(memtys):
-          return([pair(vname, params-wrap(tparams, arrowType(memtys, bigty, moreRecord([])))),
-              pair("is-" + vname, arrowType([anyType], boolty, moreRecord([])))])
+          return(pair([pair(vname, params-wrap(tparams, arrowType(memtys, bigty, moreRecord([])))),
+              pair("is-" + vname, arrowType([anyType], boolty, moreRecord([])))],
+              [dataConstructor(vname, memtys)]))
         end)
     | s_datatype_singleton_variant(l, vname, constr) =>
-      return([pair(vname, bigty),
-          pair("is-" + vname, arrowType([anyType], boolty, moreRecord([])))])
+      return(pair([pair(vname, bigty),
+          pair("is-" + vname, arrowType([anyType], boolty, moreRecord([])))],
+          [dataConstructor(vname, [])]))
   end
 where:
   # NOTE(dbp 2013-10-30): I don't like writing tests with the ast written out
@@ -1251,19 +1253,22 @@ where:
     A.s_datatype_variant(dummy-loc, "foo",
     [],
     A.s_datatype_constructor(dummy-loc, "self", A.s_id(dummy-loc, "self")))),
-    [], [], [], [], default-type-env)
+    [], [], [], [], [], default-type-env)
   is
-  [pair("foo", arrowType([], footy, moreRecord([]))),
-    pair("is-foo", arrowType([anyType], boolty, moreRecord([])))]
+  pair([pair("foo", arrowType([], footy, moreRecord([]))),
+    pair("is-foo", arrowType([anyType], boolty, moreRecord([])))],
+    [dataConstructor("foo", [])])
 
   eval(get-variant-bindings("Foo", ["T"],
     A.s_datatype_variant(dummy-loc, "foo",
     [A.s_variant_member(dummy-loc, "normal", A.s_bind(dummy-loc, "a", A.a_name(dummy-loc, "String")))],
       A.s_datatype_constructor(dummy-loc, "self", A.s_id(dummy-loc, "self")))),
-    [], [], [],[],default-type-env)
+    [], [], [],[],[],default-type-env)
   is
-  [pair("foo", bigLamType(["T"],arrowType([strty], appty("Foo", ["T"]), moreRecord([])))),
-    pair("is-foo", arrowType([anyType], boolty, moreRecord([])))]
+  pair(
+    [pair("foo", bigLamType(["T"],arrowType([strty], appty("Foo", ["T"]), moreRecord([])))),
+    pair("is-foo", arrowType([anyType], boolty, moreRecord([])))],
+    [dataConstructor("foo", [strty])])
 
 
   eval(get-variant-bindings("Foo", [],
@@ -1273,10 +1278,12 @@ where:
     A.s_variant_member(dummy-loc, "normal",
         A.s_bind(dummy-loc, "b", A.a_name(dummy-loc, "Bool")))],
     A.s_datatype_constructor(dummy-loc, "self", A.s_id(dummy-loc, "self")))),
-    [],[],[],[],default-type-env)
+    [],[],[],[],[], default-type-env)
   is
-  [pair("foo", arrowType([strty, boolty], footy, moreRecord([]))),
-    pair("is-foo", arrowType([anyType], boolty, moreRecord([])))]
+  pair(
+    [pair("foo", arrowType([strty, boolty], footy, moreRecord([]))),
+    pair("is-foo", arrowType([anyType], boolty, moreRecord([])))],
+    [dataConstructor("foo", [strty, boolty])])
 end
 
 fun get-type-bindings(ast :: A.Expr) -> TCST<List<Pair<String>>>:
@@ -1295,7 +1302,7 @@ fun get-type-bindings(ast :: A.Expr) -> TCST<List<Pair<String>>>:
   end
 where:
   fun gtb-src(src):
-    eval(get-type-bindings(A.parse(src,"anonymous-file", { ["check"]: false}).with-types.block), [], [], [], [], [])
+    eval(get-type-bindings(A.parse(src,"anonymous-file", { ["check"]: false}).with-types.block), [], [], [], [], [], [])
   end
   gtb-src("x = 2") is []
   gtb-src("datatype Foo: | foo with constructor(self): self end end") is [pair(nmty("Foo"), typeNominal(anonType(moreRecord([]))))]
@@ -1501,7 +1508,7 @@ fun is-inferred-functions(ast :: A.Expr) -> TCST<List<Pair<String, Type>>>:
 where:
   fun iif-src(src):
     stx = A.parse(src,"anonymous-file", { ["check"]: false}).pre-desugar
-    eval(is-inferred-functions(stx.block), [], [], [], default-env, default-type-env)
+    eval(is-inferred-functions(stx.block), [], [], [], default-datatypes, default-env, default-type-env)
   end
   baseRec = moreRecord([])
   iif-src("fun f(): 10 where: f() is 10 end") is
@@ -1763,60 +1770,60 @@ fun subtype(l :: Loc, _child :: Type, _parent :: Type) -> TCST<Bool>:
   subtype-int(true, _child, _parent)
 where:
   l = loc("", 0, 0)
-  eval(subtype(l, anyType, anyType), [], [], [], [], default-type-env) is true
+  eval(subtype(l, anyType, anyType), [], [], [], [], [], default-type-env) is true
   numType = nmty("Number")
-  eval(subtype(l, numType, anyType), [], [], [], [], default-type-env) is true
-  eval(subtype(l, anyType, numType), [], [], [], [], default-type-env) is false
+  eval(subtype(l, numType, anyType), [], [], [], [], [], default-type-env) is true
+  eval(subtype(l, anyType, numType), [], [], [], [], [], default-type-env) is false
 
-  eval(subtype(l, nmty("Any"), nmty("Any")), [], [], [], [], default-type-env) is true
-  eval(subtype(l, numType, nmty("Any")), [], [], [], [], default-type-env) is true
-  eval(subtype(l, nmty("Any"), numType), [], [], [], [], default-type-env) is false
+  eval(subtype(l, nmty("Any"), nmty("Any")), [], [], [], [], [], default-type-env) is true
+  eval(subtype(l, numType, nmty("Any")), [], [], [], [], [], default-type-env) is true
+  eval(subtype(l, nmty("Any"), numType), [], [], [], [], [], default-type-env) is false
 
   fun recType(flds): anonType(normalRecord(flds)) end
 
-  eval(subtype(l, recType([pair("foo", anyType)]), anyType), [], [], [], [], default-type-env) is true
-  eval(subtype(l, recType([pair("foo", anyType)]), recType([pair("foo", anyType)])), [], [], [], [], default-type-env) is true
-  eval(subtype(l, recType([pair("foo", anyType)]), recType([pair("foo", numType)])), [], [], [], [], default-type-env) is false
-  eval(subtype(l, recType([pair("foo", numType)]), recType([pair("foo", anyType)])), [], [], [], [], default-type-env) is true
-  eval(subtype(l, recType([]), recType([pair("foo", numType)])), [], [], [], [], default-type-env) is false
+  eval(subtype(l, recType([pair("foo", anyType)]), anyType), [], [], [], [], [], default-type-env) is true
+  eval(subtype(l, recType([pair("foo", anyType)]), recType([pair("foo", anyType)])), [], [], [], [], [], default-type-env) is true
+  eval(subtype(l, recType([pair("foo", anyType)]), recType([pair("foo", numType)])), [], [], [], [], [], default-type-env) is false
+  eval(subtype(l, recType([pair("foo", numType)]), recType([pair("foo", anyType)])), [], [], [], [], [], default-type-env) is true
+  eval(subtype(l, recType([]), recType([pair("foo", numType)])), [], [], [], [], [], default-type-env) is false
   eval(subtype(l, recType([pair("foo", numType), pair("bar", anyType)]),
-      recType([pair("foo", anyType)])), [], [], [], [], default-type-env) is true
+      recType([pair("foo", anyType)])), [], [], [], [], [], default-type-env) is true
 
   eval(subtype(l, arrowType([], dynType, moreRecord([])),
-      arrowType([dynType], dynType, moreRecord([]))), [], [], [], [], default-type-env) is false
+      arrowType([dynType], dynType, moreRecord([]))), [], [], [], [], [], default-type-env) is false
   eval(subtype(l, arrowType([numType], dynType, moreRecord([])),
-      arrowType([anyType], dynType, moreRecord([]))), [], [], [], [], default-type-env) is true
+      arrowType([anyType], dynType, moreRecord([]))), [], [], [], [], [], default-type-env) is true
   eval(subtype(l, arrowType([anyType], dynType, moreRecord([])),
-      arrowType([numType], dynType, moreRecord([]))), [], [], [], [], default-type-env) is false
+      arrowType([numType], dynType, moreRecord([]))), [], [], [], [], [], default-type-env) is false
   eval(subtype(l, arrowType([anyType], dynType, moreRecord([])),
-      arrowType([anyType], dynType, moreRecord([]))), [], [], [], [], default-type-env) is true
+      arrowType([anyType], dynType, moreRecord([]))), [], [], [], [], [], default-type-env) is true
   eval(subtype(l, arrowType([anyType], anyType, moreRecord([])),
-      arrowType([anyType], numType, moreRecord([]))), [], [], [], [], default-type-env) is true
+      arrowType([anyType], numType, moreRecord([]))), [], [], [], [], [], default-type-env) is true
   eval(subtype(l, arrowType([anyType], numType, moreRecord([])),
-      arrowType([anyType], anyType, moreRecord([]))), [], [], [], [], default-type-env) is false
+      arrowType([anyType], anyType, moreRecord([]))), [], [], [], [], [], default-type-env) is false
 
   eval(subtype(l, methodType(dynType, [], dynType, moreRecord([])),
-      methodType(dynType, [dynType], dynType, moreRecord([]))), [], [], [], [], default-type-env) is false
+      methodType(dynType, [dynType], dynType, moreRecord([]))), [], [], [], [], [], default-type-env) is false
   eval(subtype(l, methodType(numType, [anyType], dynType, moreRecord([])),
-      methodType(anyType, [anyType], dynType, moreRecord([]))), [], [], [], [], default-type-env) is true
+      methodType(anyType, [anyType], dynType, moreRecord([]))), [], [], [], [], [], default-type-env) is true
   eval(subtype(l, methodType(numType, [anyType], dynType, moreRecord([])),
-      methodType(numType, [numType], dynType, moreRecord([]))), [], [], [], [], default-type-env) is false
+      methodType(numType, [numType], dynType, moreRecord([]))), [], [], [], [], [], default-type-env) is false
   eval(subtype(l, methodType(anyType, [anyType], dynType, moreRecord([])),
-      methodType(anyType, [anyType], dynType, moreRecord([]))), [], [], [], [], default-type-env) is true
+      methodType(anyType, [anyType], dynType, moreRecord([]))), [], [], [], [], [], default-type-env) is true
   eval(subtype(l, methodType(numType, [anyType], anyType, moreRecord([])),
-      methodType(anyType, [anyType], numType, moreRecord([]))), [], [], [], [], default-type-env) is true
+      methodType(anyType, [anyType], numType, moreRecord([]))), [], [], [], [], [], default-type-env) is true
   eval(subtype(l, methodType(numType, [anyType], numType, moreRecord([])),
-      methodType(anyType, [anyType], anyType, moreRecord([]))), [], [], [], [], default-type-env) is false
+      methodType(anyType, [anyType], anyType, moreRecord([]))), [], [], [], [], [], default-type-env) is false
 
-  eval(subtype(l, anyType, nmty("Any")), [], [], [], [], default-type-env) is true
+  eval(subtype(l, anyType, nmty("Any")), [], [], [], [], [], default-type-env) is true
 
-  eval(subtype(l, appty("Foo", []), nmty("Any")), [], [], [], [], default-type-env)
+  eval(subtype(l, appty("Foo", []), nmty("Any")), [], [], [], [], [], default-type-env)
   is true
-  eval(subtype(l, appty("Foo", []), bigLamType(["T"], appType("Foo", []))), [], [], [], [], default-type-env)
+  eval(subtype(l, appty("Foo", []), bigLamType(["T"], appType("Foo", []))), [], [], [], [], [], default-type-env)
   is false
-  eval(subtype(l, appty("Foo", ["String"]), appty("Foo", ["Any"])), [], [], [], [], default-type-env)
+  eval(subtype(l, appty("Foo", ["String"]), appty("Foo", ["Any"])), [], [], [], [], [], default-type-env)
   is true
-  eval(subtype(l, bigLamType(["T"], appty("Option", ["T"])), bigLamType(["T"], appty("Option", ["T"]))), [], [], [], [], default-type-env)
+  eval(subtype(l, bigLamType(["T"], appty("Option", ["T"])), bigLamType(["T"], appty("Option", ["T"]))), [], [], [], [], [], default-type-env)
   is true
 
 end
@@ -1970,6 +1977,11 @@ default-type-env = [
   pair(nameType("Nothing"), typeNominal(anonType(normalRecord([]))))
 ]
 
+default-datatypes = [
+  pair("List", dataDef(["T"], [dataConstructor("empty", []), dataConstructor("link", [nmty("T"), appty("List", ["T"])])])),
+  pair("Option", dataDef(["T"], [dataConstructor("none", []), dataConstructor("some", [nmty("T")])]))
+]
+
 default-env = [
   pair("list", anonType(
       moreRecord([
@@ -2091,11 +2103,11 @@ fun tc-main(p, s):
   stx = s^A.parse(p, { ["check"]: false})
   # NOTE(dbp 2013-11-03): This is sort of crummy. Need to get bindings first, for use
   # with inferring functions, but then will do this again when we start type checking...
-  bindings = eval(get-bindings(stx.with-types.block), [], [], [], default-env, default-type-env)
-  iifs = eval(is-inferred-functions(stx.pre-desugar.block), [], [], [], bindings + default-env, default-type-env)
+  bindings = eval(get-bindings(stx.with-types.block), [], [], [], default-datatypes, default-env, default-type-env)
+  iifs = eval(is-inferred-functions(stx.pre-desugar.block), [], [], [], bindings.b + default-datatypes, bindings.a + default-env, default-type-env)
   run(infer(stx.with-types.block)^bind(fun(ast):
         tc(ast)
-      end), [], [], iifs, default-env, default-type-env)
+      end), [], [], iifs, default-datatypes, default-env, default-type-env)
 end
 
 
@@ -2154,15 +2166,15 @@ fun tc-branches(bs :: List<TCST<Type>>) -> TCST<TCBranchRes>:
       end
     end)
 where:
-  eval(tc-branches([return(dynType), return(anyType)]), [], [], [], [], default-type-env)
+  eval(tc-branches([return(dynType), return(anyType)]), [], [], [], [], [], default-type-env)
     is branchCompatible(anyType)
-  eval(tc-branches([return(dynType), return(anyType),return(nmty("Bool"))]), [], [], [], [], default-type-env)
+  eval(tc-branches([return(dynType), return(anyType),return(nmty("Bool"))]), [], [], [], [], [], default-type-env)
     is branchIncompatible([anyType, nmty("Bool")])
   eval(tc-branches([return(dynType), return(bigLamType(["T"], appty("Option", ["T"]))),
-        return(appty("Option", ["Bool"])), return(appty("Option", ["String"]))]), [], [], [], [], default-type-env)
+        return(appty("Option", ["Bool"])), return(appty("Option", ["String"]))]), [], [], [], [], [], default-type-env)
     is branchIncompatible([appty("Option", ["Bool"]), appty("Option", ["String"])])
   eval(tc-branches([return(dynType), return(bigLamType(["T"], appty("Option", ["T"]))),
-        return(bigLamType(["U"], appty("Option", ["U"]))), return(appty("Option", ["String"]))]), [], [], [], [], default-type-env)
+        return(bigLamType(["U"], appty("Option", ["U"]))), return(appty("Option", ["String"]))]), [], [], [], [], [], default-type-env)
     is branchCompatible(appty("Option", ["String"]))
 
 end
@@ -2253,7 +2265,7 @@ fun infer-app(l :: Loc, fn :: A.Expr, args :: List<A.Expr>) -> TCST<A.Expr>:
             end
           end)
       else:
-        return(ast)
+        return(A.s_app(l, fn, args))
       end
     end)
 end
@@ -2263,166 +2275,168 @@ fun infer(ast :: A.Expr) -> TCST<A.Expr>:
   get-type-bindings(ast)^bind(fun(newtypes):
       add-types(newtypes,
         get-bindings(ast)^bind(fun(bindings):
-            add-bindings(bindings,
-              cases(A.Expr) ast:
-                | s_block(l, stmts) =>
-                  sequence(stmts.map(infer))^bind(
-                    fun(stmts_):
-                      return(A.s_block(l, stmts_))
-                    end)
-                | s_user_block(l, block) => infer(block)^bind(fun(block_):
-                      return(A.s_user_block(block))
-                    end)
-                | s_instantiate(l, expr, params) =>
-                  # NOTE(dbp 2013-12-03): this seems wrong. Want to infer deeper in expr,
-                  # but not the top level, as we have explicit instantiation. Not sure how.
-                  return(ast)
-                | s_var(l, bnd, val) =>
-                  infer-let(A.s_var, l, bnd, val)
-                | s_let(l, bnd, val) =>
-                  infer-let(A.s_let, l, bnd, val)
-                | s_assign(l, id, val) =>
-                  infer(val)^bind(fun(val_): return(A.s_assign(l, id, val_)) end)
-                | s_if_else(l, branches, elsebranch) =>
-                  sequence(branches.map(fun(b):
-                        infer(b.test)^bind(fun(bt):
-                            infer(b.body)^bind(fun(bb):
-                                return(A.s_if_branch(b.l, bt, bb))
-                              end)
-                          end)
-                      end))^bind(fun(branches_):
-                      infer(elsebranch)^bind(fun(elsebranch_):
-                          return(A.s_if_else(l, branches_, elsebranch_))
-                        end)
-                    end)
-                | s_try(l, body, id, _except) =>
-                  infer(body)^bind(fun(body_):
-                      infer(_except)^bind(fun(except_):
-                          return(A.s_try(l, body_, id, except_))
-                        end)
-                    end)
-                | s_lam(l, ps, _args, ann, doc, body, ck) =>
-                  infer(ck)^bind(fun(ck_):
-                      bind-params(ps,
-                        sequence(_args.map(fun(b): get-type(b.ann)^bind(fun(t):
-                                  return(pair(b.id, t))
-                              end) end))^
-                        bind(fun(args):
-                            add-bindings(args,
-                              infer(body)^bind(fun(body_):
-                                  return(A.s_lam(l, ps, _args, ann, doc, body_, ck_))
+            add-bindings(bindings.a,
+              add-datatypes(bindings.b,
+                cases(A.Expr) ast:
+                  | s_block(l, stmts) =>
+                    sequence(stmts.map(infer))^bind(
+                      fun(stmts_):
+                        return(A.s_block(l, stmts_))
+                      end)
+                  | s_user_block(l, block) => infer(block)^bind(fun(block_):
+                        return(A.s_user_block(block))
+                      end)
+                  | s_instantiate(l, expr, params) =>
+                    # NOTE(dbp 2013-12-03): this seems wrong. Want to infer deeper in expr,
+                    # but not the top level, as we have explicit instantiation. Not sure how.
+                    return(ast)
+                  | s_var(l, bnd, val) =>
+                    infer-let(A.s_var, l, bnd, val)
+                  | s_let(l, bnd, val) =>
+                    infer-let(A.s_let, l, bnd, val)
+                  | s_assign(l, id, val) =>
+                    infer(val)^bind(fun(val_): return(A.s_assign(l, id, val_)) end)
+                  | s_if_else(l, branches, elsebranch) =>
+                    sequence(branches.map(fun(b):
+                          infer(b.test)^bind(fun(bt):
+                              infer(b.body)^bind(fun(bb):
+                                  return(A.s_if_branch(b.l, bt, bb))
                                 end)
-                              )
-                          end)
-                        )
-                    end)
-                | s_method(l, args, ann, doc, body, ck) =>
-                  infer(body)^bind(fun(body_):
-                      infer(ck)^bind(fun(ck_):
-                          return(A.s_method(l, args, ann, doc, body_, ck_))
-                        end)
-                    end)
-                | s_extend(l, super, fields) =>
-                  infer(super)^bind(fun(super_):
-                      sequence(fields.map(fun(f):
-                            infer(f.value)^bind(fun(fv):
-                                return(A.s_data_field(f.l, f.name, fv))
-                              end)
-                          end))^bind(fun(fields_):
-                          return(A.s_extend(l, super_, fields_))
-                        end)
-                    end)
-                | s_update(l, super, fields) =>
-                  infer(super)^bind(fun(super_):
-                      sequence(fields.map(fun(f):
-                            infer(f.value)^bind(fun(fv):
-                                return(A.s_data_field(f.l, f.name, fv))
-                              end)
-                          end))^bind(fun(fields_):
-                          return(A.s_update(l, super_, fields_))
-                        end)
-                    end)
-                | s_obj(l, fields) =>
-                  sequence(fields.map(fun(f):
-                            infer(f.value)^bind(fun(fv):
-                            return(A.s_data_field(f.l, f.name, fv))
-                          end)
-                      end))^bind(fun(fields_):
-                      return(A.s_obj(l, fields_))
-                    end)
-                | s_app(l, fn, args) =>
-                    infer-app(l, fn, args)
-                | s_id(l, id) => return(ast)
-                | s_num(l, num) => return(ast)
-                | s_bool(l, bool) => return(ast)
-                | s_str(l, str) => return(ast)
-                | s_get_bang(l, obj, str) =>
-                  infer(obj)^bind(fun(obj_): return(A.s_get_bang(l, obj_, str)) end)
-                | s_bracket(l, obj, field) =>
-                  infer(obj)^bind(fun(obj_):
-                      infer(field)^bind(fun(field_):
-                          return(A.s_bracket(l, obj_, field_))
-                        end)
-                    end)
-                | s_colon_bracket(l, obj, field) =>
-                  infer(obj)^bind(fun(obj_):
-                      infer(field)^bind(fun(field_):
-                          return(A.s_bracket(l, obj_, field_))
-                        end)
-                    end)
-                | s_datatype(l, name, params, variants, ck) =>
-                  infer(ck)^bind(fun(check_):
-                      sequence(variants.map(fun(v):
-                            cases(A.Variant) v:
-                              | s_datatype_variant(l1, name1, members, constructor) =>
-                                infer(constructor.body)^bind(fun(cb):
-                                    return(A.s_datatype_variant(l1, name1, members,
-                                        A.s_datatype_constructor(
-                                          constructor.l,
-                                          constructor.self,
-                                          cb
-                                          )))
-                                  end)
-                              | s_datatype_singleton_variant(l1, name1, constructor) =>
-                                infer(constructor.body)^bind(fun(cb):
-                                    return(A.s_datatype_singleton_variant(l1, name1,
-                                        A.s_datatype_constructor(
-                                          constructor.l,
-                                          constructor.self,
-                                          cb
-                                          )))
-                                  end)
-                            end
-                          end))^bind(fun(variants_):
-                          return(A.s_datatype(l, name, params, variants_, check_))
-                        end)
-                    end)
-                | s_cases(l, type, val, branches) =>
-                  infer(val)^bind(fun(val_):
-                      sequence(branches.map(fun(b):
-                            infer(b.body)^bind(fun(bb):
-                                return(A.s_cases_branch(b.l, b.name, b.args, bb))
-                              end)
-                          end))^bind(fun(branches_):
-                          return(A.s_cases(l, type, val_, branches_))
-                        end)
-                    end)
-                | s_cases_else(l, type, val, branches, _else) =>
-                  infer(_else)^bind(fun(else_):
-                      infer(val)^bind(fun(val_):
-                          sequence(branches.map(fun(b):
-                                infer(b.body)^bind(fun(bb):
-                                    return(A.s_cases_branch(b.l, b.name, b.args, bb))
-                                  end)
-                              end))^bind(fun(branches_):
-                              return(A.s_cases_else(l, type, val_, branches_, else_))
                             end)
-                        end)
-                    end)
-                | s_list(l, values) =>
-                  sequence(values.map(infer))^bind(fun(values_): return(A.s_list(l, values_)) end)
-                | else => raise("infer: no case matched for: " + torepr(ast))
-              end
+                        end))^bind(fun(branches_):
+                        infer(elsebranch)^bind(fun(elsebranch_):
+                            return(A.s_if_else(l, branches_, elsebranch_))
+                          end)
+                      end)
+                  | s_try(l, body, id, _except) =>
+                    infer(body)^bind(fun(body_):
+                        infer(_except)^bind(fun(except_):
+                            return(A.s_try(l, body_, id, except_))
+                          end)
+                      end)
+                  | s_lam(l, ps, _args, ann, doc, body, ck) =>
+                    infer(ck)^bind(fun(ck_):
+                        bind-params(ps,
+                          sequence(_args.map(fun(b): get-type(b.ann)^bind(fun(t):
+                                    return(pair(b.id, t))
+                                end) end))^
+                          bind(fun(args):
+                              add-bindings(args,
+                                infer(body)^bind(fun(body_):
+                                    return(A.s_lam(l, ps, _args, ann, doc, body_, ck_))
+                                  end)
+                                )
+                            end)
+                          )
+                      end)
+                  | s_method(l, args, ann, doc, body, ck) =>
+                    infer(body)^bind(fun(body_):
+                        infer(ck)^bind(fun(ck_):
+                            return(A.s_method(l, args, ann, doc, body_, ck_))
+                          end)
+                      end)
+                  | s_extend(l, super, fields) =>
+                    infer(super)^bind(fun(super_):
+                        sequence(fields.map(fun(f):
+                              infer(f.value)^bind(fun(fv):
+                                  return(A.s_data_field(f.l, f.name, fv))
+                                end)
+                            end))^bind(fun(fields_):
+                            return(A.s_extend(l, super_, fields_))
+                          end)
+                      end)
+                  | s_update(l, super, fields) =>
+                    infer(super)^bind(fun(super_):
+                        sequence(fields.map(fun(f):
+                              infer(f.value)^bind(fun(fv):
+                                  return(A.s_data_field(f.l, f.name, fv))
+                                end)
+                            end))^bind(fun(fields_):
+                            return(A.s_update(l, super_, fields_))
+                          end)
+                      end)
+                  | s_obj(l, fields) =>
+                    sequence(fields.map(fun(f):
+                          infer(f.value)^bind(fun(fv):
+                              return(A.s_data_field(f.l, f.name, fv))
+                            end)
+                        end))^bind(fun(fields_):
+                        return(A.s_obj(l, fields_))
+                      end)
+                  | s_app(l, fn, args) =>
+                    infer-app(l, fn, args)
+                  | s_id(l, id) => return(ast)
+                  | s_num(l, num) => return(ast)
+                  | s_bool(l, bool) => return(ast)
+                  | s_str(l, str) => return(ast)
+                  | s_get_bang(l, obj, str) =>
+                    infer(obj)^bind(fun(obj_): return(A.s_get_bang(l, obj_, str)) end)
+                  | s_bracket(l, obj, field) =>
+                    infer(obj)^bind(fun(obj_):
+                        infer(field)^bind(fun(field_):
+                            return(A.s_bracket(l, obj_, field_))
+                          end)
+                      end)
+                  | s_colon_bracket(l, obj, field) =>
+                    infer(obj)^bind(fun(obj_):
+                        infer(field)^bind(fun(field_):
+                            return(A.s_bracket(l, obj_, field_))
+                          end)
+                      end)
+                  | s_datatype(l, name, params, variants, ck) =>
+                    infer(ck)^bind(fun(check_):
+                        sequence(variants.map(fun(v):
+                              cases(A.Variant) v:
+                                | s_datatype_variant(l1, name1, members, constructor) =>
+                                  infer(constructor.body)^bind(fun(cb):
+                                      return(A.s_datatype_variant(l1, name1, members,
+                                          A.s_datatype_constructor(
+                                            constructor.l,
+                                            constructor.self,
+                                            cb
+                                            )))
+                                    end)
+                                | s_datatype_singleton_variant(l1, name1, constructor) =>
+                                  infer(constructor.body)^bind(fun(cb):
+                                      return(A.s_datatype_singleton_variant(l1, name1,
+                                          A.s_datatype_constructor(
+                                            constructor.l,
+                                            constructor.self,
+                                            cb
+                                            )))
+                                    end)
+                              end
+                            end))^bind(fun(variants_):
+                            return(A.s_datatype(l, name, params, variants_, check_))
+                          end)
+                      end)
+                  | s_cases(l, type, val, branches) =>
+                    infer(val)^bind(fun(val_):
+                        sequence(branches.map(fun(b):
+                              infer(b.body)^bind(fun(bb):
+                                  return(A.s_cases_branch(b.l, b.name, b.args, bb))
+                                end)
+                            end))^bind(fun(branches_):
+                            return(A.s_cases(l, type, val_, branches_))
+                          end)
+                      end)
+                  | s_cases_else(l, type, val, branches, _else) =>
+                    infer(_else)^bind(fun(else_):
+                        infer(val)^bind(fun(val_):
+                            sequence(branches.map(fun(b):
+                                  infer(b.body)^bind(fun(bb):
+                                      return(A.s_cases_branch(b.l, b.name, b.args, bb))
+                                    end)
+                                end))^bind(fun(branches_):
+                                return(A.s_cases_else(l, type, val_, branches_, else_))
+                              end)
+                          end)
+                      end)
+                  | s_list(l, values) =>
+                    sequence(values.map(infer))^bind(fun(values_): return(A.s_list(l, values_)) end)
+                  | else => raise("infer: no case matched for: " + torepr(ast))
+                end
+                )
               )
           end)
         )
@@ -2824,113 +2838,115 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
   get-type-bindings(ast)^bind(fun(newtypes):
       add-types(newtypes,
         get-bindings(ast)^bind(fun(bindings):
-            add-bindings(bindings,
-              cases(A.Expr) ast:
-                | s_block(l, stmts) =>
-                  sequence(stmts.map(tc))^bind(
-                    fun(tys):
-                      return(if tys == []: nmty("Nothing") else: tys.last() end)
-                    end)
-                | s_user_block(l, block) => tc(block)
-                  # NOTE(dbp 2013-11-10): As of now, the type system does not know about mutation,
-                  # so vars look like lets.
-                | s_hint_expr(l, hs, e) => tc(e)
-                | s_instantiate(l, expr, _params) =>
-                  tc(expr)^bind(fun(exprty):
-                      sequence(_params.map(get-type))^bind(fun(params):
-                          cases(Type) exprty:
-                            | bigLamType(ps, type) =>
-                              if ps.length() <> params.length():
-                                if is-arrowType(type):
-                                  add-error(l, msg(errParamArityMismatch(ps.length(), params.length())))
-                                  ^seq(return(dynType))
-                                else:
-                                  add-error(l,
-                                    msg(errInstantiateArityMismatch(type, ps.length(), params.length())))
-                                  ^seq(return(dynType))
-                                end
-                              else:
-                                return(for fold(base from type, rp from zip2(ps, params)):
-                                    replace(nmty(rp.a), rp.b, base)
-                                  end)
-                              end
-                            | else =>
-                              add-error(l, msg(errInstantiateNonParametric(exprty, params)))
-                              ^seq(return(dynType))
-                          end
-                        end)
-                    end)
-                | s_var(l, name, val) => tc-let(l, name, val)
-                | s_let(l, name, val) => tc-let(l, name, val)
-                | s_assign(l, id, val) => return(dynType)
-                | s_if_else(l, branches, elsebranch) => tc-if(l, branches, elsebranch)
-                | s_try(l, body, id, _except) => tc(body)^seq(add-bindings([pair(id.id, id.ann)], tc(_except)))
-                | s_lam(l, ps, args, ann, doc, body, ck) =>
-                  bind-params(ps, sequence(args.map(fun(b): get-type(b.ann)^bind(fun(t): return(pair(b.id, t)) end) end)))^bind(fun(argpairs):
-                      bind-params(ps, get-type(ann))^bind(fun(ret-ty):
-                          tc-lam(l, ps, argpairs, ret-ty, body, typeNotInferred)
-                        end)
+            add-bindings(bindings.a,
+              add-datatypes(bindings.b,
+                cases(A.Expr) ast:
+                  | s_block(l, stmts) =>
+                    sequence(stmts.map(tc))^bind(
+                      fun(tys):
+                        return(if tys == []: nmty("Nothing") else: tys.last() end)
                       end)
-                | s_method(l, args, ann, doc, body, ck) => return(dynType)
-                | s_extend(l, super, fields) =>
-                  tc(super)^bind(fun(base):
-                      for foldm(ty from base, fld from fields):
-                        tc-member(fld)^bind(fun(mty):
-                            cases(Option) mty:
-                              | none => return(ty)
-                              | some(fldty) =>
-                                return(type-record-add(ty, fldty.a, fldty.b))
+                  | s_user_block(l, block) => tc(block)
+                    # NOTE(dbp 2013-11-10): As of now, the type system does not know about mutation,
+                    # so vars look like lets.
+                  | s_hint_expr(l, hs, e) => tc(e)
+                  | s_instantiate(l, expr, _params) =>
+                    tc(expr)^bind(fun(exprty):
+                        sequence(_params.map(get-type))^bind(fun(params):
+                            cases(Type) exprty:
+                              | bigLamType(ps, type) =>
+                                if ps.length() <> params.length():
+                                  if is-arrowType(type):
+                                    add-error(l, msg(errParamArityMismatch(ps.length(), params.length())))
+                                    ^seq(return(dynType))
+                                  else:
+                                    add-error(l,
+                                      msg(errInstantiateArityMismatch(type, ps.length(), params.length())))
+                                    ^seq(return(dynType))
+                                  end
+                                else:
+                                  return(for fold(base from type, rp from zip2(ps, params)):
+                                      replace(nmty(rp.a), rp.b, base)
+                                    end)
+                                end
+                              | else =>
+                                add-error(l, msg(errInstantiateNonParametric(exprty, params)))
+                                ^seq(return(dynType))
                             end
                           end)
-                      end
-                    end)
-                | s_update(l, super, fields) => return(dynType)
-                | s_obj(l, fields) =>
-                  (for foldm(acc from normalRecord([]), f from fields):
-                      tc-member(f)^bind(fun(mty):
-                          cases(option.Option) mty:
-                            | none =>
-                              return(moreRecord(acc.fields))
-                              # NOTE(dbp 2013-10-16): This is a little bit of a hack -
-                              # to reuse the helper that wants to operate on types.
-                            | some(fty) =>
-                              return(type-record-add(anonType(acc), fty.a, fty.b).record)
-                          end
-                        end)
-                    end)^bind(fun(record):
-                      return(anonType(record))
-                    end)
-                | s_app(l, fn, args) =>
-                  tc-app(l, fn, args)
-                | s_id(l, id) =>
-                  get-env()^bind(fun(env):
-                      cases(option.Option) map-get(env, id):
-                        | none => add-error(l, msg(errUnboundIdentifier(id)))^seq(return(dynType))
-                        | some(ty) => return(ty)
-                      end
-                    end)
-                | s_num(l, num) => return(nmty("Number"))
-                | s_bool(l, bool) => return(nmty("Bool"))
-                | s_str(l, str) => return(nmty("String"))
-                | s_get_bang(l, obj, str) => return(dynType)
-                | s_bracket(l, obj, field) => tc-bracket(l, obj, field)
-                | s_colon_bracket(l, obj, field) => return(dynType)
-                | s_datatype(l, name, params, variants, ck) =>
-                  # NOTE(dbp 2013-10-30): Should statements have type nothing?
-                  return(nmty("Nothing"))
-                | s_cases(l, type, val, branches) => tc-cases(l, type, val, branches)
-                | s_cases_else(l, type, val, branches, _else) =>
-                  tc-cases(l, type, val, branches + [A.s_cases_branch(_else.l, "%else", [], _else)])
-                  # NOTE(dbp 2013-11-05): Since we type check
-                  # pre-desugar code inside 'is' tests for inference, we need
-                  # any ast nodes that could appear there (in theory, any surface syntax...)
-                | s_list(l, values) =>
-                  # NOTE(dbp 2013-11-16): I don't want to re-implement all the logic that
-                  # makes desugared lists work, so I'm just going to manually desugar and
-                  # then typecheck.
-                  infer(values.foldr(fun(v, rst): A.s_app(l, A.s_id(l, "link"), [v, rst]) end, A.s_id(l, "empty")))^bind(tc)
-                | else => raise("tc: no case matched for: " + torepr(ast))
-              end
+                      end)
+                  | s_var(l, name, val) => tc-let(l, name, val)
+                  | s_let(l, name, val) => tc-let(l, name, val)
+                  | s_assign(l, id, val) => return(dynType)
+                  | s_if_else(l, branches, elsebranch) => tc-if(l, branches, elsebranch)
+                  | s_try(l, body, id, _except) => tc(body)^seq(add-bindings([pair(id.id, id.ann)], tc(_except)))
+                  | s_lam(l, ps, args, ann, doc, body, ck) =>
+                    bind-params(ps, sequence(args.map(fun(b): get-type(b.ann)^bind(fun(t): return(pair(b.id, t)) end) end)))^bind(fun(argpairs):
+                        bind-params(ps, get-type(ann))^bind(fun(ret-ty):
+                            tc-lam(l, ps, argpairs, ret-ty, body, typeNotInferred)
+                          end)
+                      end)
+                  | s_method(l, args, ann, doc, body, ck) => return(dynType)
+                  | s_extend(l, super, fields) =>
+                    tc(super)^bind(fun(base):
+                        for foldm(ty from base, fld from fields):
+                          tc-member(fld)^bind(fun(mty):
+                              cases(Option) mty:
+                                | none => return(ty)
+                                | some(fldty) =>
+                                  return(type-record-add(ty, fldty.a, fldty.b))
+                              end
+                            end)
+                        end
+                      end)
+                  | s_update(l, super, fields) => return(dynType)
+                  | s_obj(l, fields) =>
+                    (for foldm(acc from normalRecord([]), f from fields):
+                        tc-member(f)^bind(fun(mty):
+                            cases(option.Option) mty:
+                              | none =>
+                                return(moreRecord(acc.fields))
+                                # NOTE(dbp 2013-10-16): This is a little bit of a hack -
+                                # to reuse the helper that wants to operate on types.
+                              | some(fty) =>
+                                return(type-record-add(anonType(acc), fty.a, fty.b).record)
+                            end
+                          end)
+                      end)^bind(fun(record):
+                        return(anonType(record))
+                      end)
+                  | s_app(l, fn, args) =>
+                    tc-app(l, fn, args)
+                  | s_id(l, id) =>
+                    get-env()^bind(fun(env):
+                        cases(option.Option) map-get(env, id):
+                          | none => add-error(l, msg(errUnboundIdentifier(id)))^seq(return(dynType))
+                          | some(ty) => return(ty)
+                        end
+                      end)
+                  | s_num(l, num) => return(nmty("Number"))
+                  | s_bool(l, bool) => return(nmty("Bool"))
+                  | s_str(l, str) => return(nmty("String"))
+                  | s_get_bang(l, obj, str) => return(dynType)
+                  | s_bracket(l, obj, field) => tc-bracket(l, obj, field)
+                  | s_colon_bracket(l, obj, field) => return(dynType)
+                  | s_datatype(l, name, params, variants, ck) =>
+                    # NOTE(dbp 2013-10-30): Should statements have type nothing?
+                    return(nmty("Nothing"))
+                  | s_cases(l, type, val, branches) => tc-cases(l, type, val, branches)
+                  | s_cases_else(l, type, val, branches, _else) =>
+                    tc-cases(l, type, val, branches + [A.s_cases_branch(_else.l, "%else", [], _else)])
+                    # NOTE(dbp 2013-11-05): Since we type check
+                    # pre-desugar code inside 'is' tests for inference, we need
+                    # any ast nodes that could appear there (in theory, any surface syntax...)
+                  | s_list(l, values) =>
+                    # NOTE(dbp 2013-11-16): I don't want to re-implement all the logic that
+                    # makes desugared lists work, so I'm just going to manually desugar and
+                    # then typecheck.
+                    infer(values.foldr(fun(v, rst): A.s_app(l, A.s_id(l, "link"), [v, rst]) end, A.s_id(l, "empty")))^bind(tc)
+                  | else => raise("tc: no case matched for: " + torepr(ast))
+                end
+                )
               )
           end
           )
@@ -2940,10 +2956,10 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
 where:
   fun tc-src(src):
     stx = A.parse(src,"anonymous-file", { ["check"]: false}).with-types
-    eval(tc(stx.block), [], [], [], default-env, default-type-env)
+    eval(tc(stx.block), [], [], [], default-datatypes, default-env, default-type-env)
   end
   fun tc-stx(stx):
-    eval(tc(stx), [], [], [], default-env, default-type-env)
+    eval(tc(stx), [], [], [], default-datatypes, default-env, default-type-env)
   end
 
   tc-src("1") is nmty("Number")
