@@ -367,9 +367,9 @@ check:
     add-datatypes([pair("D", dataDef("D", [], []))], get-datatypes()),
     [], [], [], [], [], []
     ) is [pair("D", dataDef("D", [], []))]
-
-
 end
+
+eval-default = eval(_, [], [], [], default-datatypes, default-env, default-type-env)
 
 
 ################################################################################
@@ -2257,546 +2257,574 @@ fun tycon(t :: Type) -> ConTerm:
 end
 
 data UnifyError:
-  | unifyError(t1 :: Type, l1 :: Loc, t2 :: Type, l2 :: loc)
+  | unifyError(t1 :: ConTerm, l1 :: Loc, t2 :: ConTerm, l2 :: Loc)
 end
 
-fun infer(expr :: A.Expr) -> TCST<A.Expr>:
-  fun add-placeholders(expr1 :: A.Expr, skip :: Bool) -> TCST<Pair<List<String>, A.Expr>>:
-    doc: "Skip causes the placeholders not to be added to the outermost expression.
-    This prevents double instantiation."
-    cases(A.Expr) expr1:
-      | s_instantiate(l, e, params) =>
-        add-placeholders(e, true)^bind(fun(_e):
-            return(pair(_e.a, A.s_instantiate(l, _e.b, params)))
-          end)
-      | s_id(l, id) =>
-        if skip:
-          return(pair([], expr1))
-        else:
-          get-env()^bind(fun(env):
-              cases(Option<Type>) map-get(env, id):
-                | none => # unbound id, will be caught later
+fun add-placeholders(expr1 :: A.Expr, skip :: Bool) -> TCST<Pair<List<String>, A.Expr>>:
+  doc: "Skip causes the placeholders not to be added to the outermost expression.
+  This prevents double instantiation."
+  cases(A.Expr) expr1:
+    | s_instantiate(l, e, params) =>
+      add-placeholders(e, true)^bind(fun(_e):
+          return(pair(_e.a, A.s_instantiate(l, _e.b, params)))
+        end)
+    | s_id(l, id) =>
+      if skip:
+        return(pair([], expr1))
+      else:
+        get-env()^bind(fun(env):
+            cases(Option<Type>) map-get(env, id):
+              | none => # unbound id, will be caught later
+                return(pair([], expr1))
+              | some(t) =>
+                if is-bigLamType(t):
+                  ps = t.params.map(fun(_): gensym("p") end)
+                  return(pair(ps, A.s_instantiate(l, A.s_id(l, id), ps.map(A.a_name(l, _)))))
+                else:
                   return(pair([], expr1))
-                | some(t) =>
-                  if is-bigLamType(t):
-                    ps = t.params.map(fun(_): gensym("p") end)
-                    return(pair(ps, A.s_instantiate(l, A.s_id(l, id), ps.map(A.a_name(l, _)))))
-                  else:
-                    return(pair([], expr1))
-                  end
+                end
+            end
+          end)
+      end
+    | s_bracket(l, obj, field) =>
+      # NOTE(dbp 2013-12-06): Type checking here to get something to see if we need
+      # to instantiate. I'm not sure if this is right, but some form of it needs to happen,
+      # as the most common instantiation is going to be list.["empty"] and friends.
+      # It is possible better interleaving can make this work (to infer obj before needing
+      # to add placeholders).
+      add-placeholders(obj, false)^bind(fun(_obj):
+          tc(expr1)^bind(fun(exprty):
+              if is-bigLamType(exprty):
+                if skip:
+                  return(pair(_obj.a, A.s_bracket(l, _obj.b, field)))
+                else:
+                  ps = exprty.params.map(fun(_): gensym("p") end)
+                  return(pair(ps + _obj.a,
+                      A.s_instantiate(l, A.s_bracket(l, _obj.b, field), ps.map(A.a_name(l, _)))))
+                end
+              else:
+                return(pair(_obj.a, A.s_bracket(l, _obj.b, field)))
               end
             end)
-        end
-      | s_bracket(l, obj, field) =>
-        # NOTE(dbp 2013-12-06): Type checking here to get something to see if we need
-        # to instantiate. I'm not sure if this is right, but some form of it needs to happen,
-        # as the most common instantiation is going to be list.["empty"] and friends.
-        # It is possible better interleaving can make this work (to infer obj before needing
-        # to add placeholders).
-        add-placeholders(obj, false)^bind(fun(_obj):
-            tc(expr1)^bind(fun(exprty):
-                if is-bigLamType(exprty):
-                  if skip:
-                    return(pair(_obj.a, A.s_bracket(l, _obj.b, field)))
-                  else:
-                    ps = exprty.params.map(fun(_): gensym("p") end)
-                    return(pair(ps + _obj.a,
-                        A.s_instantiate(l, A.s_bracket(l, _obj.b, field), ps.map(A.a_name(l, _)))))
-                  end
+        end)
+    | s_colon_bracket(l, obj, field) =>
+      add-placeholders(obj, false)^bind(fun(_obj):
+          tc(expr1)^bind(fun(exprty):
+              if is-bigLamType(exprty):
+                if skip:
+                  return(pair(_obj.a, A.s_colon_bracket(l, _obj.b, field)))
                 else:
-                  return(pair(_obj.a, A.s_bracket(l, _obj.b, field)))
+                  ps = exprty.params.map(fun(_): gensym("p") end)
+                  return(pair(ps + _obj.a,
+                      A.s_instantiate(l, A.s_colon_bracket(l, _obj.b, field), ps.map(A.a_name(l, _)))))
                 end
-              end)
-          end)
-      | s_colon_bracket(l, obj, field) =>
-        add-placeholders(obj, false)^bind(fun(_obj):
-            tc(expr1)^bind(fun(exprty):
-                if is-bigLamType(exprty):
-                  if skip:
-                    return(pair(_obj.a, A.s_colon_bracket(l, _obj.b, field)))
-                  else:
-                    ps = exprty.params.map(fun(_): gensym("p") end)
-                    return(pair(ps + _obj.a,
-                        A.s_instantiate(l, A.s_colon_bracket(l, _obj.b, field), ps.map(A.a_name(l, _)))))
-                  end
-                else:
-                  return(pair(obj.a, A.s_colon_bracket(l, _obj.b, field)))
-                end
-              end)
-          end)
-      | s_block(l, exprs) =>
-        sequence(exprs.map(add-placeholders(_,false)))^bind(fun(_exprs):
-            ps = unzip2(exprs)
-            return(pair(ps.a^concat(), A.s_block(l, ps.b)))
-          end)
-      | s_user_block(l, expr2) =>
-        add-placeholders(expr2, false)^bind(fun(p):
-            return(pair(p.a, A.s_user_block(p.b)))
-          end)
-      | s_var(l, r, val) =>
-        add-placeholders(r, false)^bind(fun(_r):
-            add-placeholders(val, false)^bind(fun(_val):
-                return(pair(_r.a + _val.a, A.s_var(l, _r.b, _val.b)))
-              end)
-          end)
-      | s_let(l, r, val) =>
-        add-placeholders(r, false)^bind(fun(_r):
-            add-placeholders(val, false)^bind(fun(_val):
-                return(pair(_r.a + _val.a, A.s_let(l, _r.b, _val.b)))
-              end)
-          end)
-      | s_assign(l, n, val) =>
-        add-placeholders(val, false)^bind(fun(_val):
-            return(pair(_val.a, A.s_assign(l, n, _val.b)))
-          end)
-      | s_if_else(l, branches, elsebranch) =>
-        add-placeholders(elsebranch, false)^bind(fun(_eb):
-            sequence(branches.map(fun(b):
-                  add-placeholders(b.test, false)^bind(fun(_t):
-                      add-placeholders(b.body, false)^bind(fun(_b):
-                          return(pair(_t.a + _t.b, A.s_if_branch(b.l, _t.b, _b.b)))
-                        end)
-                    end)
-                end))^bind(fun(_branches):
-                rezipped = unzip2(_branches)
-                return(pair(rezipped.a^concat() + _eb.a, A.s_if_else(l, rezipped.b, _eb.b)))
-              end)
-          end)
-      | s_try(l, body, id, _except) =>
-        add-placeholders(body, false)^bind(fun(_body):
-            add-placeholders(_except, false)^bind(fun(_exc):
-                return(pair(_body.a + _exc.a, A.s_try(l, _body.b, id, _exc.b)))
-              end)
-          end)
-        # NOTE(dbp 2013-12-06): Not going inside functions, as this process will be
-        # repeated for each function body.
-      | s_lam(l, ps, _args, ann, doc, body, ck) =>  return(pair([], expr1))
-      | s_method(l, args, ann, doc, body, ck) => return(pair([], expr1))
-      | s_extend(l, super, fields) =>
-        add-placeholders(super, false)^bind(fun(_super):
-            sequence(fields.map(fun(f):
-                  add-placeholders(f.value, false)^bind(fun(_v):
-                      return(pair(_v.a, A.s_data-field(f.l, f.name, _v.b)))
-                    end)
-                end))^bind(fun(_fields):
-                rezipped = unzip2(_fields)
-                return(pair(_super.a + rezipped.a^concat(), A.s_extend(l, _super.b, _fields.b)))
-              end)
-          end)
-      | s_update(l, super, fields) =>
-        add-placeholders(super, false)^bind(fun(_super):
-            sequence(fields.map(fun(f):
-                  add-placeholders(f.value, false)^bind(fun(_v):
-                      return(pair(_v.a, A.s_data-field(f.l, f.name, _v.b)))
-                    end)
-                end))^bind(fun(_fields):
-                rezipped = unzip2(_fields)
-                return(pair(_super.a + rezipped.a^concat(), A.s_update(l, _super.b, _fields.b)))
-              end)
-          end)
-      | s_obj(l, fields) =>
-        sequence(fields.map(fun(f):
-              add-placeholders(f.value, false)^bind(fun(_v):
-                  return(pair(_v.a, A.s_data-field(f.l, f.name, _v.b)))
-                end)
-            end))^bind(fun(_fields):
-            rezipped = unzip2(_fields)
-            return(pair(rezipped.a^concat(), A.s_object(l, _fields.b)))
-          end)
-      | s_app(l, fn, args) =>
-        add-placeholders(fn, false)^bind(fun(_fn):
-            sequence(args.map(add-placeholders(_, false)))^bind(fun(_args):
-                rezipped = unzip2(_args)
-                return(pair(_fn.a + rezipped.a^concat(), A.s_app(l, _fn.b, rezipped.b)))
-              end)
-          end)
-      | s_num(l, num) => return(pair([], expr1))
-      | s_bool(l, bool) => return(pair([], expr1))
-      | s_str(l, str) => return(pair([], expr1))
-      | s_get_bang(l, obj, str) =>
-        add-placeholders(obj, false)^bind(fun(_obj):
-            return(pair(_obj.a, A.s_get_bang(l, _obj.b, str)))
-          end)
-      | s_datatype(l, name, params, variants, ck) =>
-        # NOTE(dbp 2013-12-06): Not going inside constructtors, as this process will be
-        # repeated for each.
-        add-placeholders(ck, false)^bind(fun(_ck):
-            return(pair(_ck.a, A.s_datatype(l, name, params, variants, _ck.b)))
-          end)
-      | s_cases(l, type, val, branches) =>
-        add-placeholders(val, false)^bind(fun(_val):
-            sequence(branches.map(fun(b):
-                  add-placeholders(b.body, false)^bind(fun(bb):
-                      return(pair(bb.a, A.s_cases_branch(b.l, b.name, b.args, bb)))
-                    end)
-                end))^bind(fun(_branches):
-                rzp = unzip2(_branches)
-                return(pair(_val.a + rzp.a^concat(), A.s_cases(l, type, _val.b, rzp.b)))
-              end)
-          end)
-      | s_cases_else(l, type, val, branches, _else) =>
-        add-placeholders(val, false)^bind(fun(_val):
-            add-placeholders(_else, false)^bind(fun(_els):
-                sequence(branches.map(fun(b):
-                      add-placeholders(b.body, false)^bind(fun(bb):
-                          return(pair(bb.a, A.s_cases_branch(b.l, b.name, b.args, bb)))
-                        end)
-                    end))^bind(fun(_branches):
-                    rzp = unzip2(_branches)
-                    return(pair(_val.a + _els.a + rzp.a^concat(),
-                        A.s_cases_else(l, type, _val.b, rzp.b, _els)))
+              else:
+                return(pair(obj.a, A.s_colon_bracket(l, _obj.b, field)))
+              end
+            end)
+        end)
+    | s_block(l, exprs) =>
+      sequence(exprs.map(add-placeholders(_,false)))^bind(fun(_exprs):
+          ps = unzip2(exprs)
+          return(pair(ps.a^concat(), A.s_block(l, ps.b)))
+        end)
+    | s_user_block(l, expr2) =>
+      add-placeholders(expr2, false)^bind(fun(p):
+          return(pair(p.a, A.s_user_block(p.b)))
+        end)
+    | s_var(l, r, val) =>
+      add-placeholders(r, false)^bind(fun(_r):
+          add-placeholders(val, false)^bind(fun(_val):
+              return(pair(_r.a + _val.a, A.s_var(l, _r.b, _val.b)))
+            end)
+        end)
+    | s_let(l, r, val) =>
+      add-placeholders(r, false)^bind(fun(_r):
+          add-placeholders(val, false)^bind(fun(_val):
+              return(pair(_r.a + _val.a, A.s_let(l, _r.b, _val.b)))
+            end)
+        end)
+    | s_assign(l, n, val) =>
+      add-placeholders(val, false)^bind(fun(_val):
+          return(pair(_val.a, A.s_assign(l, n, _val.b)))
+        end)
+    | s_if_else(l, branches, elsebranch) =>
+      add-placeholders(elsebranch, false)^bind(fun(_eb):
+          sequence(branches.map(fun(b):
+                add-placeholders(b.test, false)^bind(fun(_t):
+                    add-placeholders(b.body, false)^bind(fun(_b):
+                        return(pair(_t.a + _t.b, A.s_if_branch(b.l, _t.b, _b.b)))
+                      end)
                   end)
+              end))^bind(fun(_branches):
+              rezipped = unzip2(_branches)
+              return(pair(rezipped.a^concat() + _eb.a, A.s_if_else(l, rezipped.b, _eb.b)))
+            end)
+        end)
+    | s_try(l, body, id, _except) =>
+      add-placeholders(body, false)^bind(fun(_body):
+          add-placeholders(_except, false)^bind(fun(_exc):
+              return(pair(_body.a + _exc.a, A.s_try(l, _body.b, id, _exc.b)))
+            end)
+        end)
+      # NOTE(dbp 2013-12-06): Not going inside functions, as this process will be
+      # repeated for each function body.
+    | s_lam(l, ps, _args, ann, doc, body, ck) =>  return(pair([], expr1))
+    | s_method(l, args, ann, doc, body, ck) => return(pair([], expr1))
+    | s_extend(l, super, fields) =>
+      add-placeholders(super, false)^bind(fun(_super):
+          sequence(fields.map(fun(f):
+                add-placeholders(f.value, false)^bind(fun(_v):
+                    return(pair(_v.a, A.s_data-field(f.l, f.name, _v.b)))
+                  end)
+              end))^bind(fun(_fields):
+              rezipped = unzip2(_fields)
+              return(pair(_super.a + rezipped.a^concat(), A.s_extend(l, _super.b, _fields.b)))
+            end)
+        end)
+    | s_update(l, super, fields) =>
+      add-placeholders(super, false)^bind(fun(_super):
+          sequence(fields.map(fun(f):
+                add-placeholders(f.value, false)^bind(fun(_v):
+                    return(pair(_v.a, A.s_data-field(f.l, f.name, _v.b)))
+                  end)
+              end))^bind(fun(_fields):
+              rezipped = unzip2(_fields)
+              return(pair(_super.a + rezipped.a^concat(), A.s_update(l, _super.b, _fields.b)))
+            end)
+        end)
+    | s_obj(l, fields) =>
+      sequence(fields.map(fun(f):
+            add-placeholders(f.value, false)^bind(fun(_v):
+                return(pair(_v.a, A.s_data-field(f.l, f.name, _v.b)))
               end)
-          end)
-      | s_list(l, elts) =>
-        sequence(elts.map(add-placeholders(_, false)))^bind(fun(_elts):
-            elts-unz = unzip2(_elts)
-            return(pair(elts-unz.a^concat(), A.s_list(l, elts-unz.b)))
-          end)
-      | else => raise("add-placeholders: no case matched for: " + torepr(expr1))
-    end
+          end))^bind(fun(_fields):
+          rezipped = unzip2(_fields)
+          return(pair(rezipped.a^concat(), A.s_object(l, _fields.b)))
+        end)
+    | s_app(l, fn, args) =>
+      add-placeholders(fn, false)^bind(fun(_fn):
+          sequence(args.map(add-placeholders(_, false)))^bind(fun(_args):
+              rezipped = unzip2(_args)
+              return(pair(_fn.a + rezipped.a^concat(), A.s_app(l, _fn.b, rezipped.b)))
+            end)
+        end)
+    | s_num(l, num) => return(pair([], expr1))
+    | s_bool(l, bool) => return(pair([], expr1))
+    | s_str(l, str) => return(pair([], expr1))
+    | s_get_bang(l, obj, str) =>
+      add-placeholders(obj, false)^bind(fun(_obj):
+          return(pair(_obj.a, A.s_get_bang(l, _obj.b, str)))
+        end)
+    | s_datatype(l, name, params, variants, ck) =>
+      # NOTE(dbp 2013-12-06): Not going inside constructtors, as this process will be
+      # repeated for each.
+      add-placeholders(ck, false)^bind(fun(_ck):
+          return(pair(_ck.a, A.s_datatype(l, name, params, variants, _ck.b)))
+        end)
+    | s_cases(l, type, val, branches) =>
+      add-placeholders(val, false)^bind(fun(_val):
+          sequence(branches.map(fun(b):
+                add-placeholders(b.body, false)^bind(fun(bb):
+                    return(pair(bb.a, A.s_cases_branch(b.l, b.name, b.args, bb)))
+                  end)
+              end))^bind(fun(_branches):
+              rzp = unzip2(_branches)
+              return(pair(_val.a + rzp.a^concat(), A.s_cases(l, type, _val.b, rzp.b)))
+            end)
+        end)
+    | s_cases_else(l, type, val, branches, _else) =>
+      add-placeholders(val, false)^bind(fun(_val):
+          add-placeholders(_else, false)^bind(fun(_els):
+              sequence(branches.map(fun(b):
+                    add-placeholders(b.body, false)^bind(fun(bb):
+                        return(pair(bb.a, A.s_cases_branch(b.l, b.name, b.args, bb)))
+                      end)
+                  end))^bind(fun(_branches):
+                  rzp = unzip2(_branches)
+                  return(pair(_val.a + _els.a + rzp.a^concat(),
+                      A.s_cases_else(l, type, _val.b, rzp.b, _els)))
+                end)
+            end)
+        end)
+    | s_list(l, elts) =>
+      sequence(elts.map(add-placeholders(_, false)))^bind(fun(_elts):
+          elts-unz = unzip2(_elts)
+          return(pair(elts-unz.a^concat(), A.s_list(l, elts-unz.b)))
+        end)
+    | else => raise("add-placeholders: no case matched for: " + torepr(expr1))
   end
-  fun get-constraints(expr1 :: A.Expr, placeholders :: List<String>) -> TCST<List<Constraint>>:
-    gc = get-constraints(_, placeholders)
-    cases(A.Expr) expr1:
-      | s_block(l, exprs) =>
-        sequence(exprs.map(gc))^bind(fun(r): return(concat(r)) end)
-      | s_user_block(l, expr2) => gc(expr2)
-      | s_var(l, r, val) =>
-        get-type(r.bind.ann)^bind(fun(ty):
-            gc(val)^bind(fun(cs):
-                return(cs + [conEq(conVar(r.name.id), tycon(ty)),
-                    conEq(conVar(r.name.id, conExp(val)))])
-              end)
-          end)
-      | s_let(l, r, val) =>
-        get-type(r.bind.ann)^bind(fun(ty):
-            gc(val)^bind(fun(cs):
-                return(cs + [conEq(conVar(r.name.id), tycon(ty)), conEq(conVar(r.name.id, conExp(val)))])
-              end)
-          end)
-      | s_assign(l, n, val) =>
-        gc(val)^bind(fun(cs):
-            return(cs + [conEq(conVar(n), conExp(val))])
-          end)
-      | s_if_else(l, branches, elsebranch) =>
-        gc(elsebranch)^bind(fun(eb):
-            sequence(branches.map(gc))^bind(fun(bs):
-                return(eb + bs^concat() + (for foldm(cs from [], b from zip2(link(elsebranch, branches).map(some), branches.map(some) + [none])):
-                        cases(Option) b.b:
-                          | none => cs
-                          | some(exp2) => link(conEq(conExp(b.a.value), conExp(exp2)), cs)
-                        end
-                    end))
-              end)
-          end)
-      | s_try(l, body, id, _except) =>
-        gc(body)^bind(fun(b):
-            gc(_except)^bind(fun(e):
-                return(b + e)
-              end)
-          end)
-      | s_lam(l, ps, _args, ann, doc, body, ck) => return([])
-      | s_method(l, args, ann, doc, body, ck) => return([])
-      | s_extend(l, super, fields) =>
-        gc(super)^bind(fun(s):
-            sequence(fields.map(gc))^bind(fun(fs):
-                return(s + fs^concat())
-              end)
-          end)
-      | s_update(l, super, fields) =>
-        gc(super)^bind(fun(s):
-            sequence(fields.map(gc))^bind(fun(fs):
-                return(s + fs^concat())
-              end)
-          end)
-      | s_obj(l, fields) =>
-        sequence(fields.map(gc))^bind(fun(fs):
-            return(fs^concat())
-          end)
-      | s_app(l, fn, args) =>
-        gc(fn)^bind(fun(f):
-            sequence(args.map(gc))^bind(fun(acs):
-                return(f + acs^concat() + [
-                    conEq(conExp(fn), conArrow(args.map(conExp), conExp(expr1)))
-                  ])
-              end)
-          end)
-      | s_instantiate(l, e, ps) =>
-        g = gensym("p")
-        fresh-ps = ps.map(fun(_): gensym("p") end)
-        fun ty-or-ph(t) -> ConTerm:
-          if is-nameType(t) and placeholders.member(t.name):
-            conPH(t.name)
-          else:
-            tycon(t)
-          end
+where:
+  eval-default(add-placeholders(A.s_num(dummy-loc, 1), false)) is pair([], A.s_num(dummy-loc, 1))
+  empty-app = eval-default(add-placeholders(A.s_app(dummy-loc, A.s_id(dummy-loc, "empty"), []), false))
+  empty-app.a.length() is 1
+  empty-app.b satisfies A.is-s_app
+  empty-app.b._fun satisfies A.is-s_instantiate
+end
+
+fun get-constraints(expr1 :: A.Expr, placeholders :: List<String>) -> TCST<List<Constraint>>:
+  gc = get-constraints(_, placeholders)
+  cases(A.Expr) expr1:
+    | s_block(l, exprs) =>
+      sequence(exprs.map(gc))^bind(fun(r): return(concat(r)) end)
+    | s_user_block(l, expr2) => gc(expr2)
+    | s_var(l, r, val) =>
+      get-type(r.ann)^bind(fun(ty):
+          gc(val)^bind(fun(cs):
+              return(cs + (if is-dynType(ty): [] else: [conEq(conVar(r.id), tycon(ty))] end) +
+                [conEq(conVar(r.id, conExp(val)))])
+            end)
+        end)
+    | s_let(l, r, val) =>
+      get-type(r.ann)^bind(fun(ty):
+          gc(val)^bind(fun(cs):
+              return(cs + (if is-dynType(ty): [] else: [conEq(conVar(r.id), tycon(ty))] end) + [conEq(conVar(r.id), conExp(val))])
+            end)
+        end)
+    | s_assign(l, n, val) =>
+      gc(val)^bind(fun(cs):
+          return(cs + [conEq(conVar(n), conExp(val))])
+        end)
+    | s_if_else(l, branches, elsebranch) =>
+      gc(elsebranch)^bind(fun(eb):
+          sequence(branches.map(gc))^bind(fun(bs):
+              return(eb + bs^concat() + (for foldm(cs from [], b from zip2(link(elsebranch, branches).map(some), branches.map(some) + [none])):
+                    cases(Option) b.b:
+                      | none => cs
+                      | some(exp2) => link(conEq(conExp(b.a.value), conExp(exp2)), cs)
+                    end
+                  end))
+            end)
+        end)
+    | s_try(l, body, id, _except) =>
+      gc(body)^bind(fun(b):
+          gc(_except)^bind(fun(e):
+              return(b + e)
+            end)
+        end)
+    | s_lam(l, ps, _args, ann, doc, body, ck) => return([])
+    | s_method(l, args, ann, doc, body, ck) => return([])
+    | s_extend(l, super, fields) =>
+      gc(super)^bind(fun(s):
+          sequence(fields.map(gc))^bind(fun(fs):
+              return(s + fs^concat())
+            end)
+        end)
+    | s_update(l, super, fields) =>
+      gc(super)^bind(fun(s):
+          sequence(fields.map(gc))^bind(fun(fs):
+              return(s + fs^concat())
+            end)
+        end)
+    | s_obj(l, fields) =>
+      sequence(fields.map(gc))^bind(fun(fs):
+          return(fs^concat())
+        end)
+    | s_app(l, fn, args) =>
+      gc(fn)^bind(fun(f):
+          sequence(args.map(gc))^bind(fun(acs):
+              return(f + acs^concat() + [
+                  conEq(conExp(fn), conArrow(args.map(conExp), conExp(expr1)))
+                ])
+            end)
+        end)
+    | s_instantiate(l, e, ps) =>
+      g = gensym("p")
+      fresh-ps = ps.map(fun(_): gensym("p") end)
+      fun ty-or-ph(t) -> ConTerm:
+        if is-nameType(t) and placeholders.member(t.name):
+          conPH(t.name)
+        else:
+          print("tycon: " + fmty(t))
+          tycon(t)
         end
-        gc(e)^bind(fun(cs):
-            sequence(ps.map(get-type))^bind(fun(_ps):
-                return(cs +
-                  [ conEq(conExp(expr1), conApp(g, _ps.map(ty-or-ph))),
-                    conEq(conExp(e), conBigLam(fresh-ps, conApp(conVar(g), fresh-ps)))
-                  ])
-              end)
-          end)
-      | s_id(l, id) => return([conEq(conExp(expr1), conVar(id))])
-      | s_num(l, num) => return([conEq(conExp(expr1), conName("Number"))])
-      | s_bool(l, bool) => return([conEq(conExp(expr1), conName("Bool"))])
-      | s_str(l, str) => return([conEq(conExp(expr1), conName("String"))])
-      | s_get_bang(l, obj, str) => gc(obj)
-      | s_bracket(l, obj, field) => gc(obj)
-      | s_colon_bracket(l, obj, field) => gc(obj)
-      | s_datatype(l, name, params, variants, ck) => return([])
-      | s_cases(l, type, val, branches) =>
-        get-type(type)^bind(fun(t):
-            gc(val)^bind(fun(v):
-                sequence(branches.map(fun(b):
-                      gc(b.body)
-                    end))^bind(fun(bs):
-                    return(v + [conEq(conExp(val), tycon(t))] + bs^concat() + (if branches.length() == 0:
+      end
+      gc(e)^bind(fun(cs):
+          print("placeholders: " + torepr(placeholders))
+          print("ps: " + torepr(ps))
+          bind-params(placeholders,
+            sequence(ps.map(get-type)))^bind(fun(_ps):
+              print("_ps: " + torepr(_ps.map(fmty)))
+              return(cs +
+                [ conEq(conExp(expr1), conApp(conVar(g), _ps.map(ty-or-ph))),
+                  conEq(conExp(e), conBigLam(fresh-ps, conApp(conVar(g), fresh-ps.map(conVar))))
+                ])
+            end)
+        end)
+    | s_id(l, id) => return([conEq(conExp(expr1), conVar(id))])
+    | s_num(l, num) => return([conEq(conExp(expr1), conName("Number"))])
+    | s_bool(l, bool) => return([conEq(conExp(expr1), conName("Bool"))])
+    | s_str(l, str) => return([conEq(conExp(expr1), conName("String"))])
+    | s_get_bang(l, obj, str) => gc(obj)
+    | s_bracket(l, obj, field) => gc(obj)
+    | s_colon_bracket(l, obj, field) => gc(obj)
+    | s_datatype(l, name, params, variants, ck) => return([])
+    | s_cases(l, type, val, branches) =>
+      get-type(type)^bind(fun(t):
+          gc(val)^bind(fun(v):
+              sequence(branches.map(fun(b):
+                    gc(b.body)
+                  end))^bind(fun(bs):
+                  return(v + (if is-dynType(t): [] else: [conEq(conExp(val), tycon(t))] end) + bs^concat() + (if branches.length() == 0:
                         []
-                        else:
-                          for foldm(cs from [], b from zip2(branches.map(some), branches.rest.map(some) + [none])):
+                      else:
+                        for foldm(cs from [], b from zip2(branches.map(some), branches.rest.map(some) + [none])):
+                          cases(Option) b.b:
+                            | none => cs
+                            | some(exp2) => link(conEq(conExp(b.a.value), conExp(exp2)), cs)
+                          end
+                        end
+                      end))
+                end)
+            end)
+        end)
+    | s_cases_else(l, type, val, branches, _else) =>
+      get-type(type)^bind(fun(t):
+          gc(val)^bind(fun(v):
+              gc(_else)^bind(fun(e):
+                  sequence(branches.map(fun(b):
+                        gc(b.body)
+                      end))^bind(fun(bs):
+                      return(v + (if is-dynType(t): [] else: [conEq(conExp(val), tycon(t))] end) + bs^concat() +
+                        (for foldm(cs from [], b from zip2(link(_else, branches).map(some), branches.map(some) + [none])):
                             cases(Option) b.b:
                               | none => cs
                               | some(exp2) => link(conEq(conExp(b.a.value), conExp(exp2)), cs)
                             end
-                          end
-                        end))
-                  end)
-              end)
-          end)
-      | s_cases_else(l, type, val, branches, _else) =>
-        get-type(type)^bind(fun(t):
-            gc(val)^bind(fun(v):
-                gc(_else)^bind(fun(e):
-                    sequence(branches.map(fun(b):
-                          gc(b.body)
-                        end))^bind(fun(bs):
-                        return(v + [conEq(conExp(val), tycon(t))] + bs^concat() +
-                          (for foldm(cs from [], b from zip2(link(_else, branches).map(some), branches.map(some) + [none])):
-                              cases(Option) b.b:
-                                | none => cs
-                                | some(exp2) => link(conEq(conExp(b.a.value), conExp(exp2)), cs)
-                              end
                           end))
-                      end)
-                  end)
-              end)
-          end)
-      | s_list(l, elts) =>
-        t = gensym("t")
-        sequence(elts.map(gc))^bind(fun(elt-cons):
-            return([conEq(conExp(expr1), conApp(conName("List"), [conVar(t)]))] +
-              elts.map(fun(e): conEq(conExp(e), conVar(t)) end) + elt-cons^concat())
-          end)
-      | else => raise("get-constraints: no case matched for: " + torepr(expr1))
-    end
+                    end)
+                end)
+            end)
+        end)
+    | s_list(l, elts) =>
+      t = gensym("t")
+      sequence(elts.map(gc))^bind(fun(elt-cons):
+          return([conEq(conExp(expr1), conApp(conName("List"), [conVar(t)]))] +
+            elts.map(fun(e): conEq(conExp(e), conVar(t)) end) + elt-cons^concat())
+        end)
+    | else => raise("get-constraints: no case matched for: " + torepr(expr1))
   end
-  fun replace-term(t1 :: ConTerm, t2 :: ConTerm, cs :: List<Pair<ConTerm, ConTerm>>) -> List<Pair<ConTerm, ConTerm>>:
-    fun rt(ta :: ConTerm, tb :: ConTerm, td :: ConTerm) -> ConTerm:
-      r = rt(ta, tb, _)
-      if ta == td:
-        tb
-      else:
-        cases(ConTerm) td:
-          | conArrow(args, ret) =>
-            conArrow(args.map(r), r(ret))
-          | conMethod(self, args, ret) =>
-            conMethod(r(self), args.map(r), r(ret))
-          | conAnon(record) =>
-            conAnon(record.map(fun(p): pair(p.a, r(p.b)) end))
-          | conApp(name, args) =>
-            conApp(r(name), args.map(r))
-          | conBigLam(params, term) =>
-            conBigLam(params, r(term))
-          | else => td
-        end
+where:
+  n = A.s_num(dummy-loc, 10)
+  l = A.s_let(dummy-loc, A.s_bind(dummy-loc, "x", A.a_blank), n)
+  eval-default(get-constraints(l, []))
+  is [conEq(conExp(n), conName("Number")), conEq(conVar("x"), conExp(n))]
+end
+fun replace-term(t1 :: ConTerm, t2 :: ConTerm, cs :: List<Pair<ConTerm, ConTerm>>) -> List<Pair<ConTerm, ConTerm>>:
+  fun rt(ta :: ConTerm, tb :: ConTerm, td :: ConTerm) -> ConTerm:
+    r = rt(ta, tb, _)
+    if ta == td:
+      tb
+    else:
+      cases(ConTerm) td:
+        | conArrow(args, ret) =>
+          conArrow(args.map(r), r(ret))
+        | conMethod(self, args, ret) =>
+          conMethod(r(self), args.map(r), r(ret))
+        | conAnon(record) =>
+          conAnon(record.map(fun(p): pair(p.a, r(p.b)) end))
+        | conApp(name, args) =>
+          conApp(r(name), args.map(r))
+        | conBigLam(params, term) =>
+          conBigLam(params, r(term))
+        | else => td
       end
     end
-    cases(List<Constraint>) cs:
-      | empty => empty
-      | link(c, rest) =>
-        link(pair(c.a, rt(t1, t2, c.b)),
-          replace-term(t1, t2, rest))
-    end
   end
-  fun subst-add(t1 :: ConTerm, t2 :: ConTerm, subst :: List<Pair<ConTerm, ConTerm>>) -> List<Pair<ConTerm, ConTerm>>:
-    link(pair(t1, t2), replace-term(t1, t2, subst))
+  cases(List<Constraint>) cs:
+    | empty => empty
+    | link(c, rest) =>
+      link(pair(c.a, rt(t1, t2, c.b)),
+        replace-term(t1, t2, rest))
   end
-  fun unify(constraints :: List<Constraint>, subst :: List<Pair<ConTerm, ConTerm>>) -> List<Pair<ConTerm, ConTerm>>:
-    cases(List<Constraint>) constraints:
-      | empty => subst
-      | link(c, cs) =>
-        t1 = c.t1
-        t2 = c.t2
-        cases(ConTerm) t1:
-          | conVar(id) =>
-            cases(Option<ConTerm>) map-id-get(subst, t1):
-              | some(b) => unify(link(conEq(b, t2), cs), subst)
-              | none => unify(cs, subst-add(t1, t2, subst))
-            end
-          | conExp(e) =>
-            cases(Option<ConTerm>) map-id-get(subst, t1):
-              | some(b) => unify(link(conEq(b, t2), cs), subst)
-              | none => unify(cs, subst-add(t1, t2, subst))
-            end
-          | conPH(name) =>
-            cases(Option<ConTerm>) map-id-get(subst, t1):
-              | some(b) => unify(link(conEq(b, t2), cs), subst)
-              | none => unify(cs, subst-add(t1, t2, subst))
-            end
-          | conName(name1) =>
-            if is-conName(t2) and (t2.name == name1):
-              unify(cs, subst)
-            else:
-              # FIXME(dbp 2013-12-11): actual location info.
-              raise(unifyError(t1, dummy-loc, t2, dummy-loc))
-            end
-          | conArrow(args, ret) =>
-            if is-conArrow(t2) and (args.length() == t2.args.length()):
-              unify(map2(conEq, args, t2.args) + [conEq(ret, t2.ret)] + cs, subst)
-            else:
-              # FIXME(dbp 2013-12-11): actual location info.
-              raise(unifyError(t1, dummy-loc, t2, dummy-loc))
-            end
-          | conMethod(self, args, ret) =>
-            if is-conMethod(t2) and (args.length() == t2.args.length()):
-              unify(map2(conEq, args, t2.args) +
-                [conEq(ret, t2.ret), conEq(self, t2.self)] + cs, subst)
-            else:
-              # FIXME(dbp 2013-12-11): actual location info.
-              raise(unifyError(t1, dummy-loc, t2, dummy-loc))
-            end
-          | conAnon(record) =>
-            if is-conAnon(t2) and (record.length() == t2.record.length()):
-              keys1 = record.map(_.a)
-              keys2 = t2.record.map(_.a)
-              if list.all(fun(k): keys2.member(k) end, keys1):
-                unify(keys1.map(fun(k):
-                    conEq(map-get(record).value, map-get(t2.record).value)
-                    end) + cs, subst)
-              else:
-                # FIXME(dbp 2013-12-11): actual location info.
-                raise(unifyError(t1, dummy-loc, t2, dummy-loc))
-              end
-            else:
-              # FIXME(dbp 2013-12-11): actual location info.
-              raise(unifyError(t1, dummy-loc, t2, dummy-loc))
-            end
-          | conApp(name, args) =>
-            if is-conApp(t2) and (args.length() == t2.args.length()):
-              unify(link(conEq(name, t2.name), map2(conEq, args, t2.args)) + cs,
-                subst)
-            else:
-              # FIXME(dbp 2013-12-11): actual location info.
-              raise(unifyError(t1, dummy-loc, t2, dummy-loc))
-            end
-          | conBigLam(params, term) =>
-            if is-conBigLam(t2) and (params.length() == t2.params.length()):
-              # FIXME(dbp 2013-12-11): How do you unify bigLams?
-              unify(cs, subst)
-            else:
-              # FIXME(dbp 2013-12-11): actual location info.
-              raise(unifyError(t1, dummy-loc, t2, dummy-loc))
-            end
-        end
-    end
+end
+fun subst-add(t1 :: ConTerm, t2 :: ConTerm, subst :: List<Pair<ConTerm, ConTerm>>) -> List<Pair<ConTerm, ConTerm>>:
+  cases(Option<ConTerm>) map-get(subst, t2):
+    | none => 
+      link(pair(t1, t2), replace-term(t1, t2, subst))
+    | some(t3) =>
+      link(pair(t1, t3), replace-term(t1, t3, subst))
   end
-  fun replace-placeholders(
-      subst :: List<Pair<ConTerm, ConTerm>>,
-      placeholders :: List<String>,
-      expr1 :: A.Expr) -> A.Expr:
-    fun ct-to-ty(c :: ConTerm) -> Type:
-      cases(ConTerm) c:
-        | conName(name) => some(nmty(name))
+end
+fun unify(constraints :: List<Constraint>, subst :: List<Pair<ConTerm, ConTerm>>) -> List<Pair<ConTerm, ConTerm>>:
+  cases(List<Constraint>) constraints:
+    | empty => subst
+    | link(c, cs) =>
+      t1 = c.t1
+      t2 = c.t2
+      cases(ConTerm) t1:
+        | conVar(id) =>
+          cases(Option<ConTerm>) map-get(subst, t1):
+            | some(b) => unify(link(conEq(b, t2), cs), subst)
+            | none => unify(cs, subst-add(t1, t2, subst))
+          end
+        | conExp(e) =>
+          cases(Option<ConTerm>) map-get(subst, t1):
+            | some(b) => unify(link(conEq(b, t2), cs), subst)
+            | none => unify(cs, subst-add(t1, t2, subst))
+          end
+        | conPH(name) =>
+          cases(Option<ConTerm>) map-get(subst, t1):
+            | some(b) => unify(link(conEq(b, t2), cs), subst)
+            | none => unify(cs, subst-add(t1, t2, subst))
+          end
+        | conName(name1) =>
+          if is-conName(t2) and (t2.name == name1):
+            unify(cs, subst)
+          else:
+            # FIXME(dbp 2013-12-11): actual location info.
+            raise(unifyError(t1, dummy-loc, t2, dummy-loc))
+          end
         | conArrow(args, ret) =>
-          some(arrty(args.map(ct-to-ty), ct-to-ty(ret)))
+          if is-conArrow(t2) and (args.length() == t2.args.length()):
+            unify(map2(conEq, args, t2.args) + [conEq(ret, t2.ret)] + cs, subst)
+          else:
+            # FIXME(dbp 2013-12-11): actual location info.
+            raise(unifyError(t1, dummy-loc, t2, dummy-loc))
+          end
         | conMethod(self, args, ret) =>
-          some(methodType(ct-to-ty(self), args.map(ct-to-ty), ct-to-ty(ret)))
+          if is-conMethod(t2) and (args.length() == t2.args.length()):
+            unify(map2(conEq, args, t2.args) +
+              [conEq(ret, t2.ret), conEq(self, t2.self)] + cs, subst)
+          else:
+            # FIXME(dbp 2013-12-11): actual location info.
+            raise(unifyError(t1, dummy-loc, t2, dummy-loc))
+          end
         | conAnon(record) =>
-          some(anonType(normalRecord(record.map(fun(p): pair(p.a, ct-to-ty(p.b)) end))))
+          if is-conAnon(t2) and (record.length() == t2.record.length()):
+            keys1 = record.map(_.a)
+            keys2 = t2.record.map(_.a)
+            if list.all(fun(k): keys2.member(k) end, keys1):
+              unify(keys1.map(fun(k):
+                    conEq(map-get(record).value, map-get(t2.record).value)
+                  end) + cs, subst)
+            else:
+              # FIXME(dbp 2013-12-11): actual location info.
+              raise(unifyError(t1, dummy-loc, t2, dummy-loc))
+            end
+          else:
+            # FIXME(dbp 2013-12-11): actual location info.
+            raise(unifyError(t1, dummy-loc, t2, dummy-loc))
+          end
         | conApp(name, args) =>
-          cases(ConTerm) name:
-            | conName(n) => some(appty(n, args.map(ct-to-ty)))
-            | else => none
+          if is-conApp(t2) and (args.length() == t2.args.length()):
+            unify(link(conEq(name, t2.name), map2(conEq, args, t2.args)) + cs,
+              subst)
+          else:
+            # FIXME(dbp 2013-12-11): actual location info.
+            raise(unifyError(t1, dummy-loc, t2, dummy-loc))
           end
         | conBigLam(params, term) =>
-          some(bigLamType(params, ct-to-ty(term)))
-        | else => none
-      end
-    end
-    fun replace-placeholder(ph :: String, t :: Type, expr2 :: A.Expr) -> A.Expr:
-      r = replace-placeholder(ph, t, _)
-      rb = fun(b): if A.is-a_name(b.ann) and (b.ann.name == ph):
-          A.s_bind(b.l, b.id, unget-type(t))
-        else:
-          b
-        end
-      end
-      cases(A.Expr) expr2:
-        | s_instantiate(l, e, params) =>
-          A.s_instantiate(l, r(e), params.map(fun(a): if A.is-a_name(a) and (a.name == ph): unget-type(t) else: a end end))
-        | s_id(l, id) => expr2
-        | s_bracket(l, obj, field) =>
-          A.s_bracket(l, r(obj), field)
-        | s_colon_bracket(l, obj, field) =>
-          A.s_colon_bracket(l, r(obj), field)
-        | s_block(l, exprs) =>
-          A.s_block(l, exprs.map(r))
-        | s_user_block(l, expr3) =>
-          A.s_user_block(l, r(expr3))
-        | s_var(l, nm, val) =>
-          A.s_var(l, rb(nm), r(val))
-        | s_let(l, nm, val) =>
-          A.s_let(l, rb(nm), r(val))
-        | s_assign(l, n, val) =>
-          A.s_assign(l, rb(r), r(val))
-        | s_if_else(l, branches, elsebranch) =>
-          A.s_if_else(l, branches.map(fun(b):
-                A.s_if_branch(b.l, r(b.test), r(b.body))
-              end), r(elsebranch))
-        | s_try(l, body, id, _except) =>
-          A.s_try(l, r(body), id, r(_except))
-        | s_lam(l, ps, _args, ann, doc, body, ck) =>
-          expr2
-        | s_method(l, args, ann, doc, body, ck) =>
-          expr2
-        | s_extend(l, super, fields) =>
-          A.s_extend(l, r(super), fields.map(fun(f): A.s_data_field(f.l, f.name, r(f.value)) end))
-        | s_update(l, super, fields) =>
-          A.s_update(l, r(super), fields.map(fun(f): A.s_data_field(f.l, f.name, r(f.value)) end))
-        | s_obj(l, fields) =>
-          A.s_obj(l, fields.map(fun(f): A.s_data_field(f.l, f.name, r(f.value)) end))
-        | s_app(l, fn, args) =>
-          A.s_app(l, r(fn), args.map(r))
-        | s_num(l, num) => expr2
-        | s_bool(l, bool) => expr2
-        | s_str(l, str) => expr2
-        | s_get_bang(l, obj, str) => A.s_get_bang(l, r(obj), str)
-        | s_datatype(l, name, params, variants, ck) => expr2
-        | s_cases(l, type, val, branches) =>
-          A.s_cases(l, type, r(val), branches.map(fun(b): A.s_cases_branch(b.l, b.name, b.args, r(b.body)) end))
-        | s_cases_else(l, type, val, branches, _else) =>
-          A.s_cases_else(l, type, r(val), branches.map(fun(b): A.s_cases_branch(b.l, b.name, b.args, r(b.body)) end), r(_else))
-        | s_list(l, elts) =>
-          A.s_list(l, elts.map(r))
-        | else => raise("replace-placeholder: no case matched for: " + torepr(expr2))
-      end
-    end
-    for fold(ast from expr1, p from placeholders):
-      cases(Option<ConTerm>) map-get(subst, conName(p)):
-        | none => raise("replace-placeholders: Could not find placeholder '" + p + "'' in subst - there must be a bug in constraint generation/unification")
-        | some(con) =>
-          cases(Option<Type>) ct-to-ty(con):
-            | none => raise("replace-placeholder: Placeholder '" + p + "' maps to an conExp, conVar, or conPH, or something containing one, which is not a type.")
-            | some(ty) =>
-              replace-placeholder(p, ty, ast)
+          if is-conBigLam(t2) and (params.length() == t2.params.length()):
+            # FIXME(dbp 2013-12-11): How do you unify bigLams?
+            unify(cs, subst)
+          else:
+            # FIXME(dbp 2013-12-11): actual location info.
+            raise(unifyError(t1, dummy-loc, t2, dummy-loc))
           end
       end
+  end
+where:
+  n = A.s_num(dummy-loc, 10)
+  l = A.s_let(dummy-loc, A.s_bind(dummy-loc, "x", A.a_blank), n)
+  unify([conEq(conExp(n), conName("Number")), conEq(conVar("x"), conExp(n))], []) is [pair(conVar("x"), conName("Number")), pair(conExp(n), conName("Number"))]
+end
+fun replace-placeholders(
+    subst :: List<Pair<ConTerm, ConTerm>>,
+    placeholders :: List<String>,
+    expr1 :: A.Expr) -> A.Expr:
+  fun ct-to-ty(c :: ConTerm) -> Type:
+    cases(ConTerm) c:
+      | conName(name) => some(nmty(name))
+      | conArrow(args, ret) =>
+        some(arrty(args.map(ct-to-ty), ct-to-ty(ret)))
+      | conMethod(self, args, ret) =>
+        some(methodType(ct-to-ty(self), args.map(ct-to-ty), ct-to-ty(ret)))
+      | conAnon(record) =>
+        some(anonType(normalRecord(record.map(fun(p): pair(p.a, ct-to-ty(p.b)) end))))
+      | conApp(name, args) =>
+        cases(ConTerm) name:
+          | conName(n) => some(appty(n, args.map(ct-to-ty)))
+          | else => none
+        end
+      | conBigLam(params, term) =>
+        some(bigLamType(params, ct-to-ty(term)))
+      | else => none
     end
   end
+  fun replace-placeholder(ph :: String, t :: Type, expr2 :: A.Expr) -> A.Expr:
+    r = replace-placeholder(ph, t, _)
+    rb = fun(b): if A.is-a_name(b.ann) and (b.ann.name == ph):
+        A.s_bind(b.l, b.id, unget-type(t))
+      else:
+        b
+      end
+    end
+    cases(A.Expr) expr2:
+      | s_instantiate(l, e, params) =>
+        A.s_instantiate(l, r(e), params.map(fun(a): if A.is-a_name(a) and (a.name == ph): unget-type(t) else: a end end))
+      | s_id(l, id) => expr2
+      | s_bracket(l, obj, field) =>
+        A.s_bracket(l, r(obj), field)
+      | s_colon_bracket(l, obj, field) =>
+        A.s_colon_bracket(l, r(obj), field)
+      | s_block(l, exprs) =>
+        A.s_block(l, exprs.map(r))
+      | s_user_block(l, expr3) =>
+        A.s_user_block(l, r(expr3))
+      | s_var(l, nm, val) =>
+        A.s_var(l, rb(nm), r(val))
+      | s_let(l, nm, val) =>
+        A.s_let(l, rb(nm), r(val))
+      | s_assign(l, n, val) =>
+        A.s_assign(l, rb(r), r(val))
+      | s_if_else(l, branches, elsebranch) =>
+        A.s_if_else(l, branches.map(fun(b):
+              A.s_if_branch(b.l, r(b.test), r(b.body))
+            end), r(elsebranch))
+      | s_try(l, body, id, _except) =>
+        A.s_try(l, r(body), id, r(_except))
+      | s_lam(l, ps, _args, ann, doc, body, ck) =>
+        expr2
+      | s_method(l, args, ann, doc, body, ck) =>
+        expr2
+      | s_extend(l, super, fields) =>
+        A.s_extend(l, r(super), fields.map(fun(f): A.s_data_field(f.l, f.name, r(f.value)) end))
+      | s_update(l, super, fields) =>
+        A.s_update(l, r(super), fields.map(fun(f): A.s_data_field(f.l, f.name, r(f.value)) end))
+      | s_obj(l, fields) =>
+        A.s_obj(l, fields.map(fun(f): A.s_data_field(f.l, f.name, r(f.value)) end))
+      | s_app(l, fn, args) =>
+        A.s_app(l, r(fn), args.map(r))
+      | s_num(l, num) => expr2
+      | s_bool(l, bool) => expr2
+      | s_str(l, str) => expr2
+      | s_get_bang(l, obj, str) => A.s_get_bang(l, r(obj), str)
+      | s_datatype(l, name, params, variants, ck) => expr2
+      | s_cases(l, type, val, branches) =>
+        A.s_cases(l, type, r(val), branches.map(fun(b): A.s_cases_branch(b.l, b.name, b.args, r(b.body)) end))
+      | s_cases_else(l, type, val, branches, _else) =>
+        A.s_cases_else(l, type, r(val), branches.map(fun(b): A.s_cases_branch(b.l, b.name, b.args, r(b.body)) end), r(_else))
+      | s_list(l, elts) =>
+        A.s_list(l, elts.map(r))
+      | else => raise("replace-placeholder: no case matched for: " + torepr(expr2))
+    end
+  end
+  for fold(ast from expr1, p from placeholders):
+    cases(Option<ConTerm>) map-get(subst, conName(p)):
+      | none => raise("replace-placeholders: Could not find placeholder '" + p + "'' in subst - there must be a bug in constraint generation/unification")
+      | some(con) =>
+        cases(Option<Type>) ct-to-ty(con):
+          | none => raise("replace-placeholder: Placeholder '" + p + "' maps to an conExp, conVar, or conPH, or something containing one, which is not a type.")
+          | some(ty) =>
+            replace-placeholder(p, ty, ast)
+        end
+    end
+  end
+end
+
+
+fun infer(expr :: A.Expr) -> TCST<A.Expr>:
   add-placeholders(expr, false)^bind(fun(phres):
       get-constraints(phres.b, phres.a)
       ^bind(fun(constraints):
