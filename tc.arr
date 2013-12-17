@@ -2229,6 +2229,35 @@ end
 data Constraint:
   | conEq(t1 :: ConTerm, t2 :: ConTerm)
 end
+
+fun fmterm(t :: ConTerm) -> String:
+  cases(ConTerm) t:
+    | conExp(e) =>
+      er = torepr(e)
+      "exp(" + torepr(e.l.line) + "," + torepr(e.l.column) + "," + er.substring(0, er.index-of("(")) + ")"
+    | conVar(id) => "var " + id
+    | conPH(name) => "ph " + name
+    | conName(name) => "name " + name
+    | conArrow(args, ret) =>
+      "(" + args.map(fmterm).join-str(", ") + " -> " + fmterm(ret) + ")"
+    | conMethod(self, args, ret) =>
+      "(method " + fmterm(self) + ", " + args.map(fmterm).join-str(", ") + " -> " + fmterm(ret) + ")"
+    | conAnon(record) =>
+      "{" + record.map(fun(p): p.a + ": " + fmterm(p.b) end).join-str(", ") + "}"
+    | conApp(name, args) =>
+      fmterm(name) + "(" + args.map(fmterm).join-str(", ") + ")"
+    | conBigLam(params, term) =>
+      "<" + params.join-str(",") + ">" + fmterm(term)
+  end
+end
+
+fun fmcon(c :: Constraint) -> String:
+  cases(Constraint) c:
+    | conEq(t1, t2) =>
+      fmterm(t1) + " = " + fmterm(t2) + "\n"
+  end
+end
+
 data ConTerm:
   | conExp(e :: A.Expr)
   | conVar(id :: String)
@@ -2333,16 +2362,12 @@ fun add-placeholders(expr1 :: A.Expr, skip :: Bool) -> TCST<Pair<List<String>, A
           return(pair(p.a, A.s_user_block(p.b)))
         end)
     | s_var(l, r, val) =>
-      add-placeholders(r, false)^bind(fun(_r):
-          add-placeholders(val, false)^bind(fun(_val):
-              return(pair(_r.a + _val.a, A.s_var(l, _r.b, _val.b)))
-            end)
+      add-placeholders(val, false)^bind(fun(_val):
+          return(pair(_val.a, A.s_var(l, r, _val.b)))
         end)
     | s_let(l, r, val) =>
-      add-placeholders(r, false)^bind(fun(_r):
-          add-placeholders(val, false)^bind(fun(_val):
-              return(pair(_r.a + _val.a, A.s_let(l, _r.b, _val.b)))
-            end)
+      add-placeholders(val, false)^bind(fun(_val):
+          return(pair(_val.a, A.s_let(l, r, _val.b)))
         end)
     | s_assign(l, n, val) =>
       add-placeholders(val, false)^bind(fun(_val):
@@ -2478,7 +2503,7 @@ fun get-constraints(expr1 :: A.Expr, placeholders :: List<String>) -> TCST<List<
     | s_let(l, r, val) =>
       get-type(r.ann)^bind(fun(ty):
           gc(val)^bind(fun(cs):
-              return(cs + (if is-dynType(ty): [] else: [conEq(conVar(r.id), tycon(ty))] end) + [conEq(conVar(r.id), conExp(val))])
+              return(cs + (if is-dynType(ty): [] else: [conEq(conVar(r.id), tycon(ty))] end) + [conEq(conExp(val), conVar(r.id))])
             end)
         end)
     | s_assign(l, n, val) =>
@@ -2608,7 +2633,7 @@ where:
   n = A.s_num(dummy-loc, 10)
   l = A.s_let(dummy-loc, A.s_bind(dummy-loc, "x", A.a_blank), n)
   eval-default(get-constraints(l, []))
-  is [conEq(conExp(n), conName("Number")), conEq(conVar("x"), conExp(n))]
+  is [conEq(conExp(n), conName("Number")), conEq(conExp(n), conVar("x"))]
 end
 fun replace-term(t1 :: ConTerm, t2 :: ConTerm, cs :: List<Pair<ConTerm, ConTerm>>) -> List<Pair<ConTerm, ConTerm>>:
   fun rt(ta :: ConTerm, tb :: ConTerm, td :: ConTerm) -> ConTerm:
@@ -2647,11 +2672,16 @@ fun subst-add(t1 :: ConTerm, t2 :: ConTerm, subst :: List<Pair<ConTerm, ConTerm>
   end
 end
 fun unify(constraints :: List<Constraint>, subst :: List<Pair<ConTerm, ConTerm>>) -> List<Pair<ConTerm, ConTerm>>:
+  fun is-var-type(t :: ConTerm) -> Bool:
+    is-conVar(t) or is-conExp(t) or is-conPH(t)
+  end
   cases(List<Constraint>) constraints:
     | empty => subst
     | link(c, cs) =>
       t1 = c.t1
       t2 = c.t2
+      print("subst is " + subst.map(fun(p): fmterm(p.a) + " = " + fmterm(p.b) end).join-str(", "))
+      print("unifying " + fmterm(t1) + " = " + fmterm(t2))
       cases(ConTerm) t1:
         | conVar(id) =>
           cases(Option<ConTerm>) map-get(subst, t1):
@@ -2672,23 +2702,35 @@ fun unify(constraints :: List<Constraint>, subst :: List<Pair<ConTerm, ConTerm>>
           if is-conName(t2) and (t2.name == name1):
             unify(cs, subst)
           else:
-            # FIXME(dbp 2013-12-11): actual location info.
-            raise(unifyError(t1, dummy-loc, t2, dummy-loc))
+            if is-var-type(t2):
+              unify(conEq(t2, t1)^link(cs), subst)
+            else:
+              # FIXME(dbp 2013-12-11): actual location info.
+              raise(unifyError(t1, dummy-loc, t2, dummy-loc))
+            end
           end
         | conArrow(args, ret) =>
           if is-conArrow(t2) and (args.length() == t2.args.length()):
             unify(map2(conEq, args, t2.args) + [conEq(ret, t2.ret)] + cs, subst)
           else:
-            # FIXME(dbp 2013-12-11): actual location info.
-            raise(unifyError(t1, dummy-loc, t2, dummy-loc))
+            if is-var-type(t2):
+              unify(conEq(t2, t1)^link(cs), subst)
+            else:
+              # FIXME(dbp 2013-12-11): actual location info.
+              raise(unifyError(t1, dummy-loc, t2, dummy-loc))
+            end
           end
         | conMethod(self, args, ret) =>
           if is-conMethod(t2) and (args.length() == t2.args.length()):
             unify(map2(conEq, args, t2.args) +
               [conEq(ret, t2.ret), conEq(self, t2.self)] + cs, subst)
           else:
-            # FIXME(dbp 2013-12-11): actual location info.
-            raise(unifyError(t1, dummy-loc, t2, dummy-loc))
+            if is-var-type(t2):
+              unify(conEq(t2, t1)^link(cs), subst)
+            else:
+              # FIXME(dbp 2013-12-11): actual location info.
+              raise(unifyError(t1, dummy-loc, t2, dummy-loc))
+            end
           end
         | conAnon(record) =>
           if is-conAnon(t2) and (record.length() == t2.record.length()):
@@ -2699,8 +2741,12 @@ fun unify(constraints :: List<Constraint>, subst :: List<Pair<ConTerm, ConTerm>>
                     conEq(map-get(record).value, map-get(t2.record).value)
                   end) + cs, subst)
             else:
-              # FIXME(dbp 2013-12-11): actual location info.
-              raise(unifyError(t1, dummy-loc, t2, dummy-loc))
+              if is-var-type(t2):
+                unify(conEq(t2, t1)^link(cs), subst)
+              else:
+                # FIXME(dbp 2013-12-11): actual location info.
+                raise(unifyError(t1, dummy-loc, t2, dummy-loc))
+              end
             end
           else:
             # FIXME(dbp 2013-12-11): actual location info.
@@ -2711,16 +2757,24 @@ fun unify(constraints :: List<Constraint>, subst :: List<Pair<ConTerm, ConTerm>>
             unify(link(conEq(name, t2.name), map2(conEq, args, t2.args)) + cs,
               subst)
           else:
-            # FIXME(dbp 2013-12-11): actual location info.
-            raise(unifyError(t1, dummy-loc, t2, dummy-loc))
+            if is-var-type(t2):
+              unify(conEq(t2, t1)^link(cs), subst)
+            else:
+              # FIXME(dbp 2013-12-11): actual location info.
+              raise(unifyError(t1, dummy-loc, t2, dummy-loc))
+            end
           end
         | conBigLam(params, term) =>
           if is-conBigLam(t2) and (params.length() == t2.params.length()):
             # FIXME(dbp 2013-12-11): How do you unify bigLams?
             unify(cs, subst)
           else:
-            # FIXME(dbp 2013-12-11): actual location info.
-            raise(unifyError(t1, dummy-loc, t2, dummy-loc))
+            if is-var-type(t2):
+              unify(conEq(t2, t1)^link(cs), subst)
+            else:
+              # FIXME(dbp 2013-12-11): actual location info.
+              raise(unifyError(t1, dummy-loc, t2, dummy-loc))
+            end
           end
       end
   end
@@ -2733,7 +2787,7 @@ fun replace-placeholders(
     subst :: List<Pair<ConTerm, ConTerm>>,
     placeholders :: List<String>,
     expr1 :: A.Expr) -> A.Expr:
-  fun ct-to-ty(c :: ConTerm) -> Type:
+  fun ct-to-ty(c :: ConTerm) -> Option<Type>:
     cases(ConTerm) c:
       | conName(name) => some(nmty(name))
       | conArrow(args, ret) =>
@@ -2762,7 +2816,7 @@ fun replace-placeholders(
     end
     cases(A.Expr) expr2:
       | s_instantiate(l, e, params) =>
-        A.s_instantiate(l, r(e), params.map(fun(a): if A.is-a_name(a) and (a.name == ph): unget-type(t) else: a end end))
+        A.s_instantiate(l, r(e), params.map(fun(a): if A.is-a_name(a) and (a.id == ph): unget-type(t, a.l) else: a end end))
       | s_id(l, id) => expr2
       | s_bracket(l, obj, field) =>
         A.s_bracket(l, r(obj), field)
@@ -2811,7 +2865,7 @@ fun replace-placeholders(
     end
   end
   for fold(ast from expr1, p from placeholders):
-    cases(Option<ConTerm>) map-get(subst, conName(p)):
+    cases(Option<ConTerm>) map-get(subst, conPH(p)):
       | none => raise("replace-placeholders: Could not find placeholder '" + p + "'' in subst - there must be a bug in constraint generation/unification")
       | some(con) =>
         cases(Option<Type>) ct-to-ty(con):
@@ -2828,18 +2882,28 @@ fun infer(expr :: A.Expr) -> TCST<A.Expr>:
   add-placeholders(expr, false)^bind(fun(phres):
       get-constraints(phres.b, phres.a)
       ^bind(fun(constraints):
+          print("cons: ")
+          print(constraints.map(fmcon))
           try:
             subst = unify(constraints, [])
+            print("subst: ")
+            print(subst.map(fun(p): fmterm(p.a) + " = " + fmterm(p.b) + "\n" end))
             infer-find(replace-placeholders(subst, phres.a, phres.b))
           except(e):
             when not is-unifyError(e):
               raise(e)
             end
+            print("unify error: " + torepr(e))
             add-error(expr.l, msg(errUnification(e.t1, e.l1, e.t2, e.l2)))
             ^seq(return(expr))
           end
         end)
     end)
+where:
+  fun gen-loc(l :: Number, c :: Number) -> Loc:
+    loc("gen-file", l, c)
+  end
+  eval-default(infer(A.s_let(gen-loc(0,0), A.s_bind(gen-loc(0,1), "x", A.a_app(gen-loc(0,2), A.a_name(gen-loc(0,3), "List"), [A.a_name(gen-loc(0,4), "Number")])), A.s_id(gen-loc(1,0), "empty")))) is A.s_let(gen-loc(0,0), A.s_bind(gen-loc(0,1), "x", A.a_app(gen-loc(0,2), A.a_name(gen-loc(0,3), "List"), [A.a_name(gen-loc(0,4), "Number")])), A.s_instantiate(gen-loc(1,0), A.s_id(gen-loc(1,0), "empty"), [A.a_name(gen-loc(1,0), "Number")]))
 end
 
 fun infer-find(expr :: A.Expr) -> TCST<A.Expr>:
@@ -2855,6 +2919,8 @@ fun infer-find(expr :: A.Expr) -> TCST<A.Expr>:
                       end)
                   | s_user_block(l, expr1) =>
                     infer-find(expr1)^bind(fun(e): return(A.s_user_block(l, e)) end)
+                  | s_instantiate(l, expr1, params) =>
+                    infer-find(expr1)^bind(fun(e): return(A.s_instantiate(l, e, params)) end)
                   | s_var(l, r, val) =>
                     infer-find(val)^bind(fun(e): return(A.s_var(l, r, e)) end)
                   | s_let(l, r, val) =>
