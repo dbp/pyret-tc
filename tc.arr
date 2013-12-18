@@ -451,7 +451,7 @@ data TCError:
     end
 
   | errUnification(t1, l1, t2, l2) with: tostring(self):
-      "During inference, a unification error occurred. Could not match types: " + torepr(self.t1) + " at " + torepr(self.l1) + " and " + torepr(self.t2) + " at " + torepr(self.l1) + "."
+      "During inference, a unification error occurred. Could not match types: " + fmterm(self.t1) + " at " + torepr(self.l1) + " and " + fmterm(self.t2) + " at " + torepr(self.l1) + "."
     end
 end
 
@@ -1362,8 +1362,8 @@ fun is-inferred-functions(ast :: A.Expr) -> TCST<List<Pair<String, Type>>>:
                   cases(A.Expr) fn:
                     | s_id(l2, fname) =>
                       if fname == name:
-                        infer(r)^bind(tc)^bind(fun(rightty):
-                            sequence(args.map(tc))^bind(fun(argsty):
+                        infer(r)^bind(tc-standalone)^bind(fun(rightty):
+                            sequence(args.map(tc-standalone))^bind(fun(argsty):
                                 if list.any(is-bigLamType, argsty + [rightty]):
                                   # NOTE(dbp 2013-11-17): I do not thing we can use uninstantiated
                                   # arguments without losing the simplicity of our inference. All
@@ -2216,6 +2216,7 @@ data Constraint:
 end
 
 fun fmterm(t :: ConTerm) -> String:
+  doc: "This function is useful for debugging and displaying unification errors."
   cases(ConTerm) t:
     | conExp(e) =>
       er = torepr(e)
@@ -2223,7 +2224,8 @@ fun fmterm(t :: ConTerm) -> String:
     | conVar(id) => "var " + id
     | conPH(name) => "ph " + name
     | conInst(con, args) => "inst " + fmterm(con) + "<" + args.map(fmterm).join-str(",") + ">"
-    | conName(name) => "name " + name
+    | conDyn => "Dyn*"
+    | conName(name) => name
     | conArrow(args, ret) =>
       "(" + args.map(fmterm).join-str(", ") + " -> " + fmterm(ret) + ")"
     | conMethod(self, args, ret) =>
@@ -2231,9 +2233,9 @@ fun fmterm(t :: ConTerm) -> String:
     | conAnon(record) =>
       "{" + record.map(fun(p): p.a + ": " + fmterm(p.b) end).join-str(", ") + "}"
     | conApp(name, args) =>
-      fmterm(name) + "(" + args.map(fmterm).join-str(", ") + ")"
+      fmterm(name) + "<" + args.map(fmterm).join-str(", ") + ">"
     | conBigLam(params, term) =>
-      "<" + params.join-str(",") + ">" + fmterm(term)
+      "[" + params.join-str(",") + "]" + fmterm(term)
   end
 end
 
@@ -2249,6 +2251,10 @@ data ConTerm:
   | conVar(id :: String)
   | conPH(name :: String)
   | conInst(con :: ConTerm, args :: List<ConTerm>)
+  | conDyn # NOTE(dbp 2013-12-18): This is just a placeholder; in unification
+           # anything with conDyn on either side is just thrown out. It allows
+           # the type -> conterm function to be total, and to work with functions
+           # that are missing annotations.
   | conName(name :: String)
   | conArrow(args :: List<ConTerm>, ret :: ConTerm)
   | conMethod(self :: ConTerm, args :: List<ConTerm>, ret :: ConTerm)
@@ -2259,7 +2265,7 @@ end
 
 fun tycon(t :: Type) -> ConTerm:
   cases(Type) t:
-    | dynType => raise("tycon: can't handle dynType")
+    | dynType => conDyn
     | anyType => conName("Any")
     | nameType(name) => conName(name)
     | anonType(record) =>
@@ -2274,19 +2280,6 @@ end
 
 data UnifyError:
   | unifyError(t1 :: ConTerm, l1 :: Loc, t2 :: ConTerm, l2 :: Loc)
-end
-
-fun tc-standalone(expr :: A.Expr) -> TCST<Type>:
-  doc: "A little helper to grab types based on the env of an expr. But, since this is only intended to work very locally, we don't want to worry about errors (those'll be found later)"
-  get-errors()^bind(fun(errs):
-      get-warnings()^bind(fun(warns):
-          tc(expr)^bind(fun(ty):
-              put-errors(errs)
-              ^seq(put-warnings(warns))
-              ^seq(return(ty))
-            end)
-        end)
-    end)
 end
 
 fun add-placeholders(expr1 :: A.Expr, skip :: Bool) -> TCST<Pair<List<String>, A.Expr>>:
@@ -2468,7 +2461,7 @@ fun add-placeholders(expr1 :: A.Expr, skip :: Bool) -> TCST<Pair<List<String>, A
                   end))^bind(fun(_branches):
                   rzp = unzip2(_branches)
                   return(pair(_val.a + _els.a + rzp.a^concat(),
-                      A.s_cases_else(l, type, _val.b, rzp.b, _els)))
+                      A.s_cases_else(l, type, _val.b, rzp.b, _els.b)))
                 end)
             end)
         end)
@@ -2497,7 +2490,7 @@ fun get-constraints(expr1 :: A.Expr, placeholders :: List<String>) -> TCST<List<
       get-type(r.ann)^bind(fun(ty):
           gc(val)^bind(fun(cs):
               return(cs + (if is-dynType(ty): [] else: [conEq(conVar(r.id), tycon(ty))] end) +
-                [conEq(conVar(r.id, conExp(val)))])
+                [conEq(conVar(r.id), conExp(val))])
             end)
         end)
     | s_let(l, r, val) =>
@@ -2700,113 +2693,88 @@ fun unify(constraints :: List<Constraint>, subst :: List<Pair<ConTerm, ConTerm>>
     | link(c, cs) =>
       t1 = c.t1
       t2 = c.t2
-      cases(ConTerm) t1:
-        | conVar(id) =>
-          cases(Option<ConTerm>) map-get(subst, t1):
-            | some(b) => unify(link(conEq(b, t2), cs), subst)
-            | none => unify(cs, subst-add(t1, t2, subst))
-          end
-        | conExp(e) =>
-          cases(Option<ConTerm>) map-get(subst, t1):
-            | some(b) => unify(link(conEq(b, t2), cs), subst)
-            | none => unify(cs, subst-add(t1, t2, subst))
-          end
-        | conPH(name) =>
-          cases(Option<ConTerm>) map-get(subst, t1):
-            | some(b) => unify(link(conEq(b, t2), cs), subst)
-            | none => unify(cs, subst-add(t1, t2, subst))
-          end
-        | conInst(con, args) =>
-          if is-conInst(t2) and (args.length() == t2.args.length()):
-            unify(conEq(con, t2.con)^link(map2(conEq, args, t2.args) + cs), subst)
-          else if is-conBigLam(con) and (args.length() == con.params.length()):
-            new-term = for fold(term from con.term, s from zip2(con.params, args)):
-              # TODO(dbp 2013-12-18): Should write a better replace-term helper.
-              replace-term(conName(s.a), s.b, [pair(term,term)]).first.b
+      if is-conDyn(t1) or is-conDyn(t2):
+        unify(cs, subst)
+      else:
+        cases(ConTerm) t1:
+          | conVar(id) =>
+            cases(Option<ConTerm>) map-get(subst, t1):
+              | some(b) => unify(link(conEq(b, t2), cs), subst)
+              | none => unify(cs, subst-add(t1, t2, subst))
             end
-            unify(conEq(new-term, t2)^link(cs), subst)
-          else if is-var-type(t2):
-            unify(conEq(t2, t1)^link(cs), subst)
-          else:
-            # FIXME(dbp 2013-12-11): actual location info.
-            return(unifyError(t1, dummy-loc, t2, dummy-loc))
-          end
-        | conName(name1) =>
-          fun err():
-            # FIXME(dbp 2013-12-11): actual location info.
-            return(unifyError(t1, dummy-loc, t2, dummy-loc))
-          end
-          if is-conName(t2) and (t2.name == name1):
-            unify(cs, subst)
-          else if is-var-type(t2):
+          | conExp(e) =>
+            cases(Option<ConTerm>) map-get(subst, t1):
+              | some(b) => unify(link(conEq(b, t2), cs), subst)
+              | none => unify(cs, subst-add(t1, t2, subst))
+            end
+          | conPH(name) =>
+            cases(Option<ConTerm>) map-get(subst, t1):
+              | some(b) => unify(link(conEq(b, t2), cs), subst)
+              | none => unify(cs, subst-add(t1, t2, subst))
+            end
+          | conInst(con, args) =>
+            if is-conInst(t2) and (args.length() == t2.args.length()):
+              unify(conEq(con, t2.con)^link(map2(conEq, args, t2.args) + cs), subst)
+            else if is-conBigLam(con) and (args.length() == con.params.length()):
+              new-term = for fold(term from con.term, s from zip2(con.params, args)):
+                # TODO(dbp 2013-12-18): Should write a better replace-term helper.
+                replace-term(conName(s.a), s.b, [pair(term,term)]).first.b
+              end
+              unify(conEq(new-term, t2)^link(cs), subst)
+            else if is-var-type(t2):
               unify(conEq(t2, t1)^link(cs), subst)
-          else if is-conAnon(t2):
-            # NOTE(dbp 2013-12-18): See if there something in the type env
-            get-type-env()^bind(fun(tyenv):
-                cases(TypeBinding) map-get(tyenv, nameType(name1)):
-                  | none => err()
-                  | some(bnd) =>
-                    try:
-                      if is-anonType(bnd.type):
-                        new-cs = t2.record.map(fun(p):
-                          cases(Option<Type>) map-get(bnd.type.record, p.a):
-                              | none => raise(none)
-                              | some(t) =>
-                                ct = tycon(t)
-                                if is-conMethod(ct):
-                                  [conEq(t1, ct.self), conEq(p.b, conArrow(ct.args, ct.ret))]
-                                else:
-                                  [conEq(p.b, ct)]
-                                end
-                            end
-                          end)^concat()
-                        unify(new-cs + cs, subst)
-                      else:
-                        err()
+            else:
+              # FIXME(dbp 2013-12-11): actual location info.
+              return(unifyError(t1, dummy-loc, t2, dummy-loc))
+            end
+          | conName(name1) =>
+            fun err():
+              # FIXME(dbp 2013-12-11): actual location info.
+              return(unifyError(t1, dummy-loc, t2, dummy-loc))
+            end
+            if is-conName(t2) and (t2.name == name1):
+              unify(cs, subst)
+            else if is-var-type(t2):
+              unify(conEq(t2, t1)^link(cs), subst)
+            else if is-conAnon(t2):
+              # NOTE(dbp 2013-12-18): See if there something in the type env
+              get-type-env()^bind(fun(tyenv):
+                  cases(TypeBinding) map-get(tyenv, nameType(name1)):
+                    | none => err()
+                    | some(bnd) =>
+                      try:
+                        if is-anonType(bnd.type):
+                          new-cs = t2.record.map(fun(p):
+                              cases(Option<Type>) map-get(bnd.type.record, p.a):
+                                | none => raise(none)
+                                | some(t) =>
+                                  ct = tycon(t)
+                                  if is-conMethod(ct):
+                                    [conEq(t1, ct.self), conEq(p.b, conArrow(ct.args, ct.ret))]
+                                  else:
+                                    [conEq(p.b, ct)]
+                                  end
+                              end
+                            end)^concat()
+                          unify(new-cs + cs, subst)
+                        else:
+                          err()
+                        end
+                      except(e):
+                        if is-none(e):
+                          err()
+                        else:
+                          raise(e)
+                        end
                       end
-                    except(e):
-                      if is-none(e):
-                        err()
-                      else:
-                        raise(e)
-                      end
-                    end
-                end 
-              end)
-          else:
+                  end 
+                end)
+            else:
               err()
-          end
-        | conArrow(args, ret) =>
-          if is-conArrow(t2) and (args.length() == t2.args.length()):
-            unify(map2(conEq, args, t2.args) + [conEq(ret, t2.ret)] + cs, subst)
-          else:
-            if is-var-type(t2):
-              unify(conEq(t2, t1)^link(cs), subst)
-            else:
-              # FIXME(dbp 2013-12-11): actual location info.
-              return(unifyError(t1, dummy-loc, t2, dummy-loc))
             end
-          end
-        | conMethod(self, args, ret) =>
-          if is-conMethod(t2) and (args.length() == t2.args.length()):
-            unify(map2(conEq, args, t2.args) +
-              [conEq(ret, t2.ret), conEq(self, t2.self)] + cs, subst)
-          else:
-            if is-var-type(t2):
-              unify(conEq(t2, t1)^link(cs), subst)
-            else:
-              # FIXME(dbp 2013-12-11): actual location info.
-              return(unifyError(t1, dummy-loc, t2, dummy-loc))
-            end
-          end
-        | conAnon(record) =>
-          if is-conAnon(t2) and (record.length() == t2.record.length()):
-            keys1 = record.map(_.a)
-            keys2 = t2.record.map(_.a)
-            if list.all(fun(k): keys2.member(k) end, keys1):
-              unify(keys1.map(fun(k):
-                    conEq(map-get(record).value, map-get(t2.record).value)
-                  end) + cs, subst)
+          | conArrow(args, ret) =>
+            if is-conArrow(t2) and (args.length() == t2.args.length()):
+              unify(map2(conEq, args, t2.args) + [conEq(ret, t2.ret)] + cs, subst)
             else:
               if is-var-type(t2):
                 unify(conEq(t2, t1)^link(cs), subst)
@@ -2815,78 +2783,107 @@ fun unify(constraints :: List<Constraint>, subst :: List<Pair<ConTerm, ConTerm>>
                 return(unifyError(t1, dummy-loc, t2, dummy-loc))
               end
             end
-          else:
-            # FIXME(dbp 2013-12-11): actual location info.
-            return(unifyError(t1, dummy-loc, t2, dummy-loc))
-          end
-        | conApp(name, args) =>
-          fun err():
-            # FIXME(dbp 2013-12-11): actual location info.
-            return(unifyError(t1, dummy-loc, t2, dummy-loc))
-          end
-          if is-conApp(t2) and (args.length() == t2.args.length()):
-            unify(link(conEq(name, t2.name), map2(conEq, args, t2.args)) + cs,
-              subst)
-          else if is-var-type(t2):
-            unify(conEq(t2, t1)^link(cs), subst)
-          else if is-conName(name) and is-conAnon(t2):
-            # NOTE(dbp 2013-12-18): See if there something in the type env
-            get-type-env()^bind(fun(tyenv):
-                cases(Option<TypeBinding>) map-get(tyenv, nameType(name.name)):
-                  | none => err()
-                  | some(bnd1) =>
-                    if is-bigLamType(bnd1.type) and is-appType(bnd1.type.type):
-                      cases(Option<TypeBinding>) map-get(tyenv, bnd1.type):
-                        | none => err()
-                        | some(bnd) =>
-                          try:
-                            if is-anonType(bnd.type):
-                              new-cs = t2.record.map(fun(p):
-                                  cases(Option<Type>) map-get(bnd.type.record.fields, p.a):
-                                    | none => raise(none)
-                                    | some(t) =>
-                                      ct = tycon(t)
-                                      fresh-ps = bnd1.type.params.map(fun(_): gensym("p") end)
-                                      if is-conMethod(ct):
-                                        [conEq(t1, conInst(conBigLam(bnd1.type.params, ct.self), fresh-ps.map(conVar))), conEq(p.b, conInst(conBigLam(bnd1.type.params, conArrow(ct.args, ct.ret)), fresh-ps.map(conVar)))]
-                                      else:
-                                        [conEq(p.b, conInst(conBigLam(bnd1.type.params, ct), fresh-ps.map(conVar)))]
-                                      end
-                                  end
-                                end)^concat()
-                              unify(new-cs + cs, subst)
-                            else:
-                              err()
-                            end
-                          except(e):
-                            if is-none(e):
-                              err()
-                            else:
-                              raise(e)
-                            end
-                          end
-                      end
-                    else:
-                      err()
-                    end
+          | conMethod(self, args, ret) =>
+            if is-conMethod(t2) and (args.length() == t2.args.length()):
+              unify(map2(conEq, args, t2.args) +
+                [conEq(ret, t2.ret), conEq(self, t2.self)] + cs, subst)
+            else:
+              if is-var-type(t2):
+                unify(conEq(t2, t1)^link(cs), subst)
+              else:
+                # FIXME(dbp 2013-12-11): actual location info.
+                return(unifyError(t1, dummy-loc, t2, dummy-loc))
+              end
+            end
+          | conAnon(record) =>
+            if is-conAnon(t2) and (record.length() == t2.record.length()):
+              keys1 = record.map(_.a)
+              keys2 = t2.record.map(_.a)
+              if list.all(fun(k): keys2.member(k) end, keys1):
+                unify(keys1.map(fun(k):
+                      conEq(map-get(record).value, map-get(t2.record).value)
+                    end) + cs, subst)
+              else:
+                if is-var-type(t2):
+                  unify(conEq(t2, t1)^link(cs), subst)
+                else:
+                  # FIXME(dbp 2013-12-11): actual location info.
+                  return(unifyError(t1, dummy-loc, t2, dummy-loc))
                 end
-              end)
-          else:
-            # FIXME(dbp 2013-12-11): actual location info.
-            return(unifyError(t1, dummy-loc, t2, dummy-loc))
-          end
-        | conBigLam(params, term) =>
-          if is-conBigLam(t2) and (params.length() == t2.params.length()):
-            # FIXME(dbp 2013-12-11): How do you unify bigLams?
-            unify(cs, subst)
-          else:
-            if is-var-type(t2):
-              unify(conEq(t2, t1)^link(cs), subst)
+              end
             else:
               # FIXME(dbp 2013-12-11): actual location info.
               return(unifyError(t1, dummy-loc, t2, dummy-loc))
             end
-          end
+          | conApp(name, args) =>
+            fun err():
+              # FIXME(dbp 2013-12-11): actual location info.
+              return(unifyError(t1, dummy-loc, t2, dummy-loc))
+            end
+            if is-conApp(t2) and (args.length() == t2.args.length()):
+              unify(link(conEq(name, t2.name), map2(conEq, args, t2.args)) + cs,
+                subst)
+            else if is-var-type(t2):
+              unify(conEq(t2, t1)^link(cs), subst)
+            else if is-conName(name) and is-conAnon(t2):
+              # NOTE(dbp 2013-12-18): See if there something in the type env
+              get-type-env()^bind(fun(tyenv):
+                  cases(Option<TypeBinding>) map-get(tyenv, nameType(name.name)):
+                    | none => err()
+                    | some(bnd1) =>
+                      if is-bigLamType(bnd1.type) and is-appType(bnd1.type.type):
+                        cases(Option<TypeBinding>) map-get(tyenv, bnd1.type):
+                          | none => err()
+                          | some(bnd) =>
+                            try:
+                              if is-anonType(bnd.type):
+                                new-cs = t2.record.map(fun(p):
+                                    cases(Option<Type>) map-get(bnd.type.record.fields, p.a):
+                                      | none => raise(none)
+                                      | some(t) =>
+                                        ct = tycon(t)
+                                        fresh-ps = bnd1.type.params.map(fun(_): gensym("p") end)
+                                        if is-conMethod(ct):
+                                          [conEq(t1, conInst(conBigLam(bnd1.type.params, ct.self), fresh-ps.map(conVar))), conEq(p.b, conInst(conBigLam(bnd1.type.params, conArrow(ct.args, ct.ret)), fresh-ps.map(conVar)))]
+                                        else:
+                                          [conEq(p.b, conInst(conBigLam(bnd1.type.params, ct), fresh-ps.map(conVar)))]
+                                        end
+                                    end
+                                  end)^concat()
+                                unify(new-cs + cs, subst)
+                              else:
+                                err()
+                              end
+                            except(e):
+                              if is-none(e):
+                                err()
+                              else:
+                                raise(e)
+                              end
+                            end
+                        end
+                      else:
+                        err()
+                      end
+                  end
+                end)
+            else:
+              # FIXME(dbp 2013-12-11): actual location info.
+              return(unifyError(t1, dummy-loc, t2, dummy-loc))
+            end
+          | conBigLam(params, term) =>
+            if is-conBigLam(t2) and (params.length() == t2.params.length()):
+              # FIXME(dbp 2013-12-11): How do you unify bigLams?
+              unify(cs, subst)
+            else:
+              if is-var-type(t2):
+                unify(conEq(t2, t1)^link(cs), subst)
+              else:
+                # FIXME(dbp 2013-12-11): actual location info.
+                return(unifyError(t1, dummy-loc, t2, dummy-loc))
+              end
+            end
+        end
       end
   end
 where:
@@ -2900,13 +2897,27 @@ fun replace-placeholders(
     expr1 :: A.Expr) -> A.Expr:
   fun ct-to-ty(c :: ConTerm) -> Option<Type>:
     cases(ConTerm) c:
+      | conDyn => some(dynType)
       | conName(name) => some(nmty(name))
       | conArrow(args, ret) =>
         some(arrty(args.map(ct-to-ty), ct-to-ty(ret)))
       | conMethod(self, args, ret) =>
         some(methodType(ct-to-ty(self), args.map(ct-to-ty), ct-to-ty(ret)))
       | conAnon(record) =>
-        some(anonType(normalRecord(record.map(fun(p): pair(p.a, ct-to-ty(p.b)) end))))
+        cases(Option) (for fold(flds from some([]), p from record):
+                cases(Option) flds:
+                  | none => none
+                  | some(flds1) => 
+                    cases(Option) ct-to-ty(p.b):
+                      | none => none
+                      | some(t) => some(pair(p.a, t)^link(flds1))
+                    end
+                end
+              end):
+          | none => none
+          | some(flds) =>
+            some(anonType(normalRecord(flds)))
+        end
       | conApp(name, args) =>
         cases(ConTerm) name:
           | conName(n) => some(appty(n, args.map(ct-to-ty)))
@@ -2931,7 +2942,7 @@ fun replace-placeholders(
   end
   fun replace-placeholder(ph :: String, t :: Type, expr2 :: A.Expr) -> A.Expr:
     r = replace-placeholder(ph, t, _)
-    rb = fun(b): if A.is-a_name(b.ann) and (b.ann.name == ph):
+    rb = fun(b): if A.is-a_name(b.ann) and (b.ann.id == ph):
         A.s_bind(b.l, b.id, unget-type(t))
       else:
         b
@@ -2989,10 +3000,16 @@ fun replace-placeholders(
   end
   for fold(ast from expr1, p from placeholders):
     cases(Option<ConTerm>) map-get(subst, conPH(p)):
-      | none => raise("replace-placeholders: Could not find placeholder '" + p + "'' in subst - there must be a bug in constraint generation/unification")
+      | none =>
+        # NOTE(dbp 2013-12-18): Should this be a failure / abort? It
+        # means we weren't able to solve.
+        replace-placeholder(p, dynType, ast)
       | some(con) =>
         cases(Option<Type>) ct-to-ty(con):
-          | none => raise("replace-placeholder: Placeholder '" + p + "' maps to an conExp, conVar, or conPH, or something containing one, which is not a type.")
+          | none =>
+            # NOTE(dbp 2013-12-18): Should this be a failure / abort? It
+            # means we weren't able to solve.
+            replace-placeholder(p, dynType, ast)
           | some(ty) =>
             replace-placeholder(p, ty, ast)
         end
@@ -3016,7 +3033,12 @@ fun infer(expr :: A.Expr) -> TCST<A.Expr>:
                     unify(constraints, [])^bind(fun(subst):
                         if is-unifyError(subst):
                           add-error(expr.l, msg(errUnification(subst.t1, subst.l1, subst.t2, subst.l2)))
-                          ^seq(return(expr))
+                          ^seq(block:
+                              dummy-subst = phres.a.map(fun(p): pair(conPH(p), conDyn) end)
+                              replaced = replace-placeholders(dummy-subst, phres.a, phres.b)
+
+                              infer-find(replaced)
+                            end)
                         else:
                           replaced = replace-placeholders(subst, phres.a, phres.b)
                           infer-find(replaced)
@@ -3674,6 +3696,20 @@ end
 ################################################################################
 # Main typechecking function.                                                  #
 ################################################################################
+
+fun tc-standalone(expr :: A.Expr) -> TCST<Type>:
+  doc: "A little helper get types when we don't want to record errors (as they will
+  be seen again later)."
+  get-errors()^bind(fun(errs):
+      get-warnings()^bind(fun(warns):
+          tc(expr)^bind(fun(ty):
+              put-errors(errs)
+              ^seq(put-warnings(warns))
+              ^seq(return(ty))
+            end)
+        end)
+    end)
+end
 
 fun tc(ast :: A.Expr) -> TCST<Type>:
   get-type-bindings(ast)^bind(fun(newtypes):
