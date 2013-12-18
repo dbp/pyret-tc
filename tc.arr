@@ -451,7 +451,7 @@ data TCError:
     end
 
   | errUnification(t1, l1, t2, l2) with: tostring(self):
-      "During inference, a unification error occurred. Could not match types :" + torepr(self.t1) + " at " + torepr(self.l1) + " and " + torepr(self.t2) + " at " + torepr(self.l1) + "."
+      "During inference, a unification error occurred. Could not match types: " + torepr(self.t1) + " at " + torepr(self.l1) + " and " + torepr(self.t2) + " at " + torepr(self.l1) + "."
     end
 end
 
@@ -525,21 +525,6 @@ fun <K,V> map-get(m :: Map<K,V>, k :: K) -> Option<V>:
 where:
   map-get([pair(1,3),pair('f',7)], 'f') is some(7)
   map-get([pair(1,3),pair('f',7)], 'fo') is none
-end
-
-fun <K,V> map-id-get(m :: Map<K,V>, k :: K) -> Option<V>:
-  cases(List) m:
-    | empty => none
-    | link(f,r) => if identical(k, f.a): some(f.b) else: map-id-get(r,k) end
-  end
-where:
-  data Foo:
-    | foo()
-    | bar
-  end
-  v = foo()
-  map-id-get([pair(bar,3),pair(v,7)], v) is some(7)
-  map-id-get([pair(bar,3),pair(v,7)], foo()) is none
 end
 
 fun <V> set-get(s :: Set-<V>, v :: V) -> Bool:
@@ -2291,6 +2276,19 @@ data UnifyError:
   | unifyError(t1 :: ConTerm, l1 :: Loc, t2 :: ConTerm, l2 :: Loc)
 end
 
+fun tc-standalone(expr :: A.Expr) -> TCST<Type>:
+  doc: "A little helper to grab types based on the env of an expr. But, since this is only intended to work very locally, we don't want to worry about errors (those'll be found later)"
+  get-errors()^bind(fun(errs):
+      get-warnings()^bind(fun(warns):
+          tc(expr)^bind(fun(ty):
+              put-errors(errs)
+              ^seq(put-warnings(warns))
+              ^seq(return(ty))
+            end)
+        end)
+    end)
+end
+
 fun add-placeholders(expr1 :: A.Expr, skip :: Bool) -> TCST<Pair<List<String>, A.Expr>>:
   doc: "Skip causes the placeholders not to be added to the outermost expression.
   This prevents double instantiation."
@@ -2324,7 +2322,7 @@ fun add-placeholders(expr1 :: A.Expr, skip :: Bool) -> TCST<Pair<List<String>, A
       # It is possible better interleaving can make this work (to infer obj before needing
       # to add placeholders).
       add-placeholders(obj, false)^bind(fun(_obj):
-          tc(expr1)^bind(fun(exprty):
+          tc-standalone(expr1)^bind(fun(exprty):
               if is-bigLamType(exprty):
                 if skip:
                   return(pair(_obj.a, A.s_bracket(l, _obj.b, field)))
@@ -2340,7 +2338,7 @@ fun add-placeholders(expr1 :: A.Expr, skip :: Bool) -> TCST<Pair<List<String>, A
         end)
     | s_colon_bracket(l, obj, field) =>
       add-placeholders(obj, false)^bind(fun(_obj):
-          tc(expr1)^bind(fun(exprty):
+          tc-standalone(expr1)^bind(fun(exprty):
               if is-bigLamType(exprty):
                 if skip:
                   return(pair(_obj.a, A.s_colon_bracket(l, _obj.b, field)))
@@ -2380,7 +2378,7 @@ fun add-placeholders(expr1 :: A.Expr, skip :: Bool) -> TCST<Pair<List<String>, A
           sequence(branches.map(fun(b):
                 add-placeholders(b.test, false)^bind(fun(_t):
                     add-placeholders(b.body, false)^bind(fun(_b):
-                        return(pair(_t.a + _t.b, A.s_if_branch(b.l, _t.b, _b.b)))
+                        return(pair(_t.a + _b.a, A.s_if_branch(b.l, _t.b, _b.b)))
                       end)
                   end)
               end))^bind(fun(_branches):
@@ -2402,32 +2400,32 @@ fun add-placeholders(expr1 :: A.Expr, skip :: Bool) -> TCST<Pair<List<String>, A
       add-placeholders(super, false)^bind(fun(_super):
           sequence(fields.map(fun(f):
                 add-placeholders(f.value, false)^bind(fun(_v):
-                    return(pair(_v.a, A.s_data-field(f.l, f.name, _v.b)))
+                    return(pair(_v.a, A.s_data_field(f.l, f.name, _v.b)))
                   end)
               end))^bind(fun(_fields):
               rezipped = unzip2(_fields)
-              return(pair(_super.a + rezipped.a^concat(), A.s_extend(l, _super.b, _fields.b)))
+              return(pair(_super.a + rezipped.a^concat(), A.s_extend(l, _super.b, rezipped.b)))
             end)
         end)
     | s_update(l, super, fields) =>
       add-placeholders(super, false)^bind(fun(_super):
           sequence(fields.map(fun(f):
                 add-placeholders(f.value, false)^bind(fun(_v):
-                    return(pair(_v.a, A.s_data-field(f.l, f.name, _v.b)))
+                    return(pair(_v.a, A.s_data_field(f.l, f.name, _v.b)))
                   end)
               end))^bind(fun(_fields):
               rezipped = unzip2(_fields)
-              return(pair(_super.a + rezipped.a^concat(), A.s_update(l, _super.b, _fields.b)))
+              return(pair(_super.a + rezipped.a^concat(), A.s_update(l, _super.b, rezipped.b)))
             end)
         end)
     | s_obj(l, fields) =>
       sequence(fields.map(fun(f):
             add-placeholders(f.value, false)^bind(fun(_v):
-                return(pair(_v.a, A.s_data-field(f.l, f.name, _v.b)))
+                return(pair(_v.a, A.s_data_field(f.l, f.name, _v.b)))
               end)
           end))^bind(fun(_fields):
           rezipped = unzip2(_fields)
-          return(pair(rezipped.a^concat(), A.s_object(l, _fields.b)))
+          return(pair(rezipped.a^concat(), A.s_obj(l, rezipped.b)))
         end)
     | s_app(l, fn, args) =>
       add-placeholders(fn, false)^bind(fun(_fn):
@@ -2453,7 +2451,7 @@ fun add-placeholders(expr1 :: A.Expr, skip :: Bool) -> TCST<Pair<List<String>, A
       add-placeholders(val, false)^bind(fun(_val):
           sequence(branches.map(fun(b):
                 add-placeholders(b.body, false)^bind(fun(bb):
-                    return(pair(bb.a, A.s_cases_branch(b.l, b.name, b.args, bb)))
+                    return(pair(bb.a, A.s_cases_branch(b.l, b.name, b.args, bb.b)))
                   end)
               end))^bind(fun(_branches):
               rzp = unzip2(_branches)
@@ -2514,11 +2512,14 @@ fun get-constraints(expr1 :: A.Expr, placeholders :: List<String>) -> TCST<List<
         end)
     | s_if_else(l, branches, elsebranch) =>
       gc(elsebranch)^bind(fun(eb):
-          sequence(branches.map(gc))^bind(fun(bs):
-              return(eb + bs^concat() + (for foldm(cs from [], b from zip2(link(elsebranch, branches).map(some), branches.map(some) + [none])):
+          bodies = branches.map(_.body)
+          tests = branches.map(_.test)
+          sequence(branches.map(fun(b): sequence([gc(b.test),gc(b.body)])^bind(fun(xs): return(concat(xs)) end) end))^bind(fun(bs):
+              return(eb + bs^concat() + tests.map(fun(b): conEq(conExp(b), conName("Bool")) end) +
+                (for fold(cs from [], b from zip2(link(elsebranch, bodies).map(some), bodies.map(some) + [none])):
                     cases(Option) b.b:
                       | none => cs
-                      | some(exp2) => link(conEq(conExp(b.a.value), conExp(exp2)), cs)
+                      | some(exp2) => conEq(conExp(b.a.value), conExp(exp2))^link(cs)
                     end
                   end))
             end)
@@ -2565,7 +2566,7 @@ fun get-constraints(expr1 :: A.Expr, placeholders :: List<String>) -> TCST<List<
       # look the type up and eliminate it right now. We could do this with
       # a few cases and NOT use tc (identifiers, brackets), which is probably
       # "the right thing to do".
-      tc(e)^bind(fun(ety):
+      tc-standalone(e)^bind(fun(ety):
           fresh-ps = ps.map(fun(_): gensym("p") end)
           fun ty-or-ph(t) -> ConTerm:
             if is-nameType(t) and placeholders.member(t.name):
@@ -2581,12 +2582,23 @@ fun get-constraints(expr1 :: A.Expr, placeholders :: List<String>) -> TCST<List<
                 ])
             end)
         end)
-    | s_id(l, id) => return([conEq(conExp(expr1), conVar(id))])
+    | s_id(l, id) =>
+      get-env()^bind(fun(env):
+          cases(Option<Type>) map-get(env, id):
+            | none => # unbound id, will cause error later, we don't have to try.
+              return([])
+            | some(t) =>
+              return([conEq(conExp(expr1), conVar(id)), conEq(conVar(id), tycon(t))])
+          end
+        end)
     | s_num(l, num) => return([conEq(conExp(expr1), conName("Number"))])
     | s_bool(l, bool) => return([conEq(conExp(expr1), conName("Bool"))])
     | s_str(l, str) => return([conEq(conExp(expr1), conName("String"))])
     | s_get_bang(l, obj, str) => gc(obj)
-    | s_bracket(l, obj, field) => gc(obj)
+    | s_bracket(l, obj, field) =>
+      gc(obj)^bind(fun(ocs):
+          return(ocs + [conEq(conExp(obj), conAnon([pair(field.s, conExp(expr1))]))])
+        end)
     | s_colon_bracket(l, obj, field) => gc(obj)
     | s_datatype(l, name, params, variants, ck) => return([])
     | s_cases(l, type, val, branches) =>
@@ -2598,10 +2610,10 @@ fun get-constraints(expr1 :: A.Expr, placeholders :: List<String>) -> TCST<List<
                   return(v + (if is-dynType(t): [] else: [conEq(conExp(val), tycon(t))] end) + bs^concat() + (if branches.length() == 0:
                         []
                       else:
-                        for foldm(cs from [], b from zip2(branches.map(some), branches.rest.map(some) + [none])):
+                        for fold(cs from [], b from zip2(branches.map(some), branches.rest.map(some) + [none])):
                           cases(Option) b.b:
                             | none => cs
-                            | some(exp2) => link(conEq(conExp(b.a.value), conExp(exp2)), cs)
+                            | some(exp2) => link(conEq(conExp(b.a.value.body), conExp(exp2.body)), cs)
                           end
                         end
                       end))
@@ -2615,8 +2627,9 @@ fun get-constraints(expr1 :: A.Expr, placeholders :: List<String>) -> TCST<List<
                   sequence(branches.map(fun(b):
                         gc(b.body)
                       end))^bind(fun(bs):
+                      bodies = branches.map(_.body)
                       return(v + (if is-dynType(t): [] else: [conEq(conExp(val), tycon(t))] end) + bs^concat() +
-                        (for foldm(cs from [], b from zip2(link(_else, branches).map(some), branches.map(some) + [none])):
+                        (for fold(cs from [], b from zip2(link(_else, bodies).map(some), bodies.map(some) + [none])):
                             cases(Option) b.b:
                               | none => cs
                               | some(exp2) => link(conEq(conExp(b.a.value), conExp(exp2)), cs)
@@ -2678,12 +2691,12 @@ fun subst-add(t1 :: ConTerm, t2 :: ConTerm, subst :: List<Pair<ConTerm, ConTerm>
       link(pair(t1, t3), replace-term(t1, t3, subst))
   end
 end
-fun unify(constraints :: List<Constraint>, subst :: List<Pair<ConTerm, ConTerm>>) -> List<Pair<ConTerm, ConTerm>>:
+fun unify(constraints :: List<Constraint>, subst :: List<Pair<ConTerm, ConTerm>>) -> TCST<List<Pair<ConTerm, ConTerm>>>:
   fun is-var-type(t :: ConTerm) -> Bool:
     is-conVar(t) or is-conExp(t) or is-conPH(t) or is-conInst(t)
   end
   cases(List<Constraint>) constraints:
-    | empty => subst
+    | empty => return(subst)
     | link(c, cs) =>
       t1 = c.t1
       t2 = c.t2
@@ -2706,28 +2719,62 @@ fun unify(constraints :: List<Constraint>, subst :: List<Pair<ConTerm, ConTerm>>
         | conInst(con, args) =>
           if is-conInst(t2) and (args.length() == t2.args.length()):
             unify(conEq(con, t2.con)^link(map2(conEq, args, t2.args) + cs), subst)
-          else if is-var-type(t2):
-            unify(conEq(t2, t1)^link(cs), subst)
           else if is-conBigLam(con) and (args.length() == con.params.length()):
             new-term = for fold(term from con.term, s from zip2(con.params, args)):
               # TODO(dbp 2013-12-18): Should write a better replace-term helper.
               replace-term(conName(s.a), s.b, [pair(term,term)]).first.b
             end
             unify(conEq(new-term, t2)^link(cs), subst)
+          else if is-var-type(t2):
+            unify(conEq(t2, t1)^link(cs), subst)
           else:
             # FIXME(dbp 2013-12-11): actual location info.
-            raise(unifyError(t1, dummy-loc, t2, dummy-loc))
+            return(unifyError(t1, dummy-loc, t2, dummy-loc))
           end
         | conName(name1) =>
+          fun err():
+            # FIXME(dbp 2013-12-11): actual location info.
+            return(unifyError(t1, dummy-loc, t2, dummy-loc))
+          end
           if is-conName(t2) and (t2.name == name1):
             unify(cs, subst)
-          else:
-            if is-var-type(t2):
+          else if is-var-type(t2):
               unify(conEq(t2, t1)^link(cs), subst)
-            else:
-              # FIXME(dbp 2013-12-11): actual location info.
-              raise(unifyError(t1, dummy-loc, t2, dummy-loc))
-            end
+          else if is-conAnon(t2):
+            # NOTE(dbp 2013-12-18): See if there something in the type env
+            get-type-env()^bind(fun(tyenv):
+                cases(TypeBinding) map-get(tyenv, nameType(name1)):
+                  | none => err()
+                  | some(bnd) =>
+                    try:
+                      if is-anonType(bnd.type):
+                        new-cs = t2.record.map(fun(p):
+                          cases(Option<Type>) map-get(bnd.type.record, p.a):
+                              | none => raise(none)
+                              | some(t) =>
+                                ct = tycon(t)
+                                if is-conMethod(ct):
+                                  [conEq(t1, ct.self), conEq(p.b, conArrow(ct.args, ct.ret))]
+                                else:
+                                  [conEq(p.b, ct)]
+                                end
+                            end
+                          end)^concat()
+                        unify(new-cs + cs, subst)
+                      else:
+                        err()
+                      end
+                    except(e):
+                      if is-none(e):
+                        err()
+                      else:
+                        raise(e)
+                      end
+                    end
+                end 
+              end)
+          else:
+              err()
           end
         | conArrow(args, ret) =>
           if is-conArrow(t2) and (args.length() == t2.args.length()):
@@ -2737,7 +2784,7 @@ fun unify(constraints :: List<Constraint>, subst :: List<Pair<ConTerm, ConTerm>>
               unify(conEq(t2, t1)^link(cs), subst)
             else:
               # FIXME(dbp 2013-12-11): actual location info.
-              raise(unifyError(t1, dummy-loc, t2, dummy-loc))
+              return(unifyError(t1, dummy-loc, t2, dummy-loc))
             end
           end
         | conMethod(self, args, ret) =>
@@ -2749,7 +2796,7 @@ fun unify(constraints :: List<Constraint>, subst :: List<Pair<ConTerm, ConTerm>>
               unify(conEq(t2, t1)^link(cs), subst)
             else:
               # FIXME(dbp 2013-12-11): actual location info.
-              raise(unifyError(t1, dummy-loc, t2, dummy-loc))
+              return(unifyError(t1, dummy-loc, t2, dummy-loc))
             end
           end
         | conAnon(record) =>
@@ -2765,24 +2812,68 @@ fun unify(constraints :: List<Constraint>, subst :: List<Pair<ConTerm, ConTerm>>
                 unify(conEq(t2, t1)^link(cs), subst)
               else:
                 # FIXME(dbp 2013-12-11): actual location info.
-                raise(unifyError(t1, dummy-loc, t2, dummy-loc))
+                return(unifyError(t1, dummy-loc, t2, dummy-loc))
               end
             end
           else:
             # FIXME(dbp 2013-12-11): actual location info.
-            raise(unifyError(t1, dummy-loc, t2, dummy-loc))
+            return(unifyError(t1, dummy-loc, t2, dummy-loc))
           end
         | conApp(name, args) =>
+          fun err():
+            # FIXME(dbp 2013-12-11): actual location info.
+            return(unifyError(t1, dummy-loc, t2, dummy-loc))
+          end
           if is-conApp(t2) and (args.length() == t2.args.length()):
             unify(link(conEq(name, t2.name), map2(conEq, args, t2.args)) + cs,
               subst)
+          else if is-var-type(t2):
+            unify(conEq(t2, t1)^link(cs), subst)
+          else if is-conName(name) and is-conAnon(t2):
+            # NOTE(dbp 2013-12-18): See if there something in the type env
+            get-type-env()^bind(fun(tyenv):
+                cases(Option<TypeBinding>) map-get(tyenv, nameType(name.name)):
+                  | none => err()
+                  | some(bnd1) =>
+                    if is-bigLamType(bnd1.type) and is-appType(bnd1.type.type):
+                      cases(Option<TypeBinding>) map-get(tyenv, bnd1.type):
+                        | none => err()
+                        | some(bnd) =>
+                          try:
+                            if is-anonType(bnd.type):
+                              new-cs = t2.record.map(fun(p):
+                                  cases(Option<Type>) map-get(bnd.type.record.fields, p.a):
+                                    | none => raise(none)
+                                    | some(t) =>
+                                      ct = tycon(t)
+                                      fresh-ps = bnd1.type.params.map(fun(_): gensym("p") end)
+                                      if is-conMethod(ct):
+                                        [conEq(t1, conInst(conBigLam(bnd1.type.params, ct.self), fresh-ps.map(conVar))), conEq(p.b, conInst(conBigLam(bnd1.type.params, conArrow(ct.args, ct.ret)), fresh-ps.map(conVar)))]
+                                      else:
+                                        [conEq(p.b, conInst(conBigLam(bnd1.type.params, ct), fresh-ps.map(conVar)))]
+                                      end
+                                  end
+                                end)^concat()
+                              unify(new-cs + cs, subst)
+                            else:
+                              err()
+                            end
+                          except(e):
+                            if is-none(e):
+                              err()
+                            else:
+                              raise(e)
+                            end
+                          end
+                      end
+                    else:
+                      err()
+                    end
+                end
+              end)
           else:
-            if is-var-type(t2):
-              unify(conEq(t2, t1)^link(cs), subst)
-            else:
-              # FIXME(dbp 2013-12-11): actual location info.
-              raise(unifyError(t1, dummy-loc, t2, dummy-loc))
-            end
+            # FIXME(dbp 2013-12-11): actual location info.
+            return(unifyError(t1, dummy-loc, t2, dummy-loc))
           end
         | conBigLam(params, term) =>
           if is-conBigLam(t2) and (params.length() == t2.params.length()):
@@ -2793,7 +2884,7 @@ fun unify(constraints :: List<Constraint>, subst :: List<Pair<ConTerm, ConTerm>>
               unify(conEq(t2, t1)^link(cs), subst)
             else:
               # FIXME(dbp 2013-12-11): actual location info.
-              raise(unifyError(t1, dummy-loc, t2, dummy-loc))
+              return(unifyError(t1, dummy-loc, t2, dummy-loc))
             end
           end
       end
@@ -2801,7 +2892,7 @@ fun unify(constraints :: List<Constraint>, subst :: List<Pair<ConTerm, ConTerm>>
 where:
   n = A.s_num(dummy-loc, 10)
   l = A.s_let(dummy-loc, A.s_bind(dummy-loc, "x", A.a_blank), n)
-  unify([conEq(conExp(n), conName("Number")), conEq(conVar("x"), conExp(n))], []) is [pair(conVar("x"), conName("Number")), pair(conExp(n), conName("Number"))]
+  eval-default(unify([conEq(conExp(n), conName("Number")), conEq(conVar("x"), conExp(n))], [])) is [pair(conVar("x"), conName("Number")), pair(conExp(n), conName("Number"))]
 end
 fun replace-placeholders(
     subst :: List<Pair<ConTerm, ConTerm>>,
@@ -2917,19 +3008,22 @@ fun infer(expr :: A.Expr) -> TCST<A.Expr>:
       add-bindings(bindings.a,
         add-datatypes(bindings.b,        
           add-placeholders(expr, false)^bind(fun(phres):
-              get-constraints(phres.b, phres.a)
-              ^bind(fun(constraints):
-                  try:
-                    subst = unify(constraints, [])
-                    infer-find(replace-placeholders(subst, phres.a, phres.b))
-                  except(e):
-                    when not is-unifyError(e):
-                      raise(e)
-                    end
-                    add-error(expr.l, msg(errUnification(e.t1, e.l1, e.t2, e.l2)))
-                    ^seq(return(expr))
-                  end
-                end)
+              if phres.a.length() == 0:
+                return(expr)
+              else:
+                get-constraints(phres.b, phres.a)
+                ^bind(fun(constraints):
+                    unify(constraints, [])^bind(fun(subst):
+                        if is-unifyError(subst):
+                          add-error(expr.l, msg(errUnification(subst.t1, subst.l1, subst.t2, subst.l2)))
+                          ^seq(return(expr))
+                        else:
+                          replaced = replace-placeholders(subst, phres.a, phres.b)
+                          infer-find(replaced)
+                        end
+                      end)
+                  end)
+              end
             end)
           )
         )
@@ -3095,7 +3189,7 @@ fun infer-find(expr :: A.Expr) -> TCST<A.Expr>:
                                           end))
                                     end)
                                 | s_datatype_singleton_variant(l1, name1, constructor) =>
-                                  add-bindings([pair(constructor.self, anonType([]))],
+                                  add-bindings([pair(constructor.self, anonType(normalRecord([])))],
                                     infer(constructor.body)^bind(fun(cb):
                                         return(A.s_datatype_singleton_variant(l1, name1,
                                             A.s_datatype_constructor(
@@ -3453,15 +3547,20 @@ fun tc-bracket(l :: Loc, obj :: A.Expr, field :: A.Expr) -> TCST<Type>:
                   | some(typebind) =>
                     cases(Type) typebind.type:
                       | bigLamType(params, ptype) =>
-                        record-type-lookup(typebind.type)^bind(fun(pty):
-                            cases(TySolveRes) tysolve(params, [pair(ptype, obj-ty)], [pty]):
-                              | allSolved(vs) => return(vs.first)
-                              | someSolved(vs) => return(vs.first)
-                              | incompatible =>
-                                add-error(l, msg(errAppTypeNotWellFormed(fmty(obj-ty), fmty(typebind.type))))
-                                  ^seq(return(dynType))
+                        cases(Option) map-get(type-env, typebind.type):
+                          | none => raise("tc-bracket: Found a parametric type for " + name + " in env, but not the record of methods, which shouldn't be able to happen.")
+                          | some(methods) =>
+                            if is-typeNominal(methods) and is-anonType(methods.type):
+                              record-lookup(methods.type.record)^bind(fun(mty):
+                                  return(
+                                    for fold(ty from mty, p from zip2(args, params)):
+                                      replace(nmty(p.b), p.a, ty)
+                                    end)
+                                end)
+                            else:
+                              raise("tc-bracket: Found a parametric type for " + name + " in env, but the record of methods wasn't there, which shouldn't be able to happen.")
                             end
-                          end)
+                        end
                       | else => raise("tc: found an appType that didn't map to a bigLamType in the type env. This violates a constraint, aborting.")
                     end
                 end
@@ -3607,9 +3706,10 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                                     ^seq(return(dynType))
                                   end
                                 else:
-                                  return(for fold(base from type, rp from zip2(ps, params)):
-                                      replace(nmty(rp.a), rp.b, base)
-                                    end)
+                                  inst-type = for fold(base from type, rp from zip2(ps, params)):
+                                    replace(nmty(rp.a), rp.b, base)
+                                  end
+                                  return(inst-type)
                                 end
                               | else =>
                                 add-error(l, msg(errInstantiateNonParametric(exprty, params)))
