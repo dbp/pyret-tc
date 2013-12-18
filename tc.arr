@@ -2949,6 +2949,10 @@ where:
   eval-default(infer(A.s_let(gen-loc(0,0), A.s_bind(gen-loc(0,1), "x", A.a_app(gen-loc(0,2), A.a_name(gen-loc(0,3), "List"), [A.a_name(gen-loc(0,4), "Number")])), A.s_app(gen-loc(1,0), A.s_id(gen-loc(1,1), "link"), [A.s_num(gen-loc(1,2), 10), A.s_id(gen-loc(1,3), "empty")])))) is
   A.s_let(gen-loc(0,0), A.s_bind(gen-loc(0,1), "x", A.a_app(gen-loc(0,2), A.a_name(gen-loc(0,3), "List"), [A.a_name(gen-loc(0,4), "Number")])), A.s_app(gen-loc(1,0), A.s_instantiate(gen-loc(1,1), A.s_id(gen-loc(1,1), "link"), [A.a_name(gen-loc(1,1), "Number")]), [A.s_num(gen-loc(1,2), 10), A.s_instantiate(gen-loc(1,3), A.s_id(gen-loc(1,3), "empty"), [A.a_name(gen-loc(1,3), "Number")])]))
 
+  # link(10, empty) ===> link<Number>(10, empty<Number>)
+  eval-default(infer(A.s_app(gen-loc(1,0), A.s_id(gen-loc(1,1), "link"), [A.s_num(gen-loc(1,2), 10), A.s_id(gen-loc(1,3), "empty")]))) is
+  A.s_app(gen-loc(1,0), A.s_instantiate(gen-loc(1,1), A.s_id(gen-loc(1,1), "link"), [A.a_name(gen-loc(1,1), "Number")]), [A.s_num(gen-loc(1,2), 10), A.s_instantiate(gen-loc(1,3), A.s_id(gen-loc(1,3), "empty"), [A.a_name(gen-loc(1,3), "Number")])])
+
 end
 
 fun infer-find(expr :: A.Expr) -> TCST<A.Expr>:
