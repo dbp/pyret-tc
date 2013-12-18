@@ -2237,6 +2237,7 @@ fun fmterm(t :: ConTerm) -> String:
       "exp(" + torepr(e.l.line) + "," + torepr(e.l.column) + "," + er.substring(0, er.index-of("(")) + ")"
     | conVar(id) => "var " + id
     | conPH(name) => "ph " + name
+    | conInst(con, args) => "inst " + fmterm(con) + "<" + args.map(fmterm).join-str(",") + ">"
     | conName(name) => "name " + name
     | conArrow(args, ret) =>
       "(" + args.map(fmterm).join-str(", ") + " -> " + fmterm(ret) + ")"
@@ -2262,6 +2263,7 @@ data ConTerm:
   | conExp(e :: A.Expr)
   | conVar(id :: String)
   | conPH(name :: String)
+  | conInst(con :: ConTerm, args :: List<ConTerm>)
   | conName(name :: String)
   | conArrow(args :: List<ConTerm>, ret :: ConTerm)
   | conMethod(self :: ConTerm, args :: List<ConTerm>, ret :: ConTerm)
@@ -2354,7 +2356,7 @@ fun add-placeholders(expr1 :: A.Expr, skip :: Bool) -> TCST<Pair<List<String>, A
         end)
     | s_block(l, exprs) =>
       sequence(exprs.map(add-placeholders(_,false)))^bind(fun(_exprs):
-          ps = unzip2(exprs)
+          ps = unzip2(_exprs)
           return(pair(ps.a^concat(), A.s_block(l, ps.b)))
         end)
     | s_user_block(l, expr2) =>
@@ -2554,25 +2556,28 @@ fun get-constraints(expr1 :: A.Expr, placeholders :: List<String>) -> TCST<List<
             end)
         end)
     | s_instantiate(l, e, ps) =>
-      g = gensym("p")
-      fresh-ps = ps.map(fun(_): gensym("p") end)
-      fun ty-or-ph(t) -> ConTerm:
-        if is-nameType(t) and placeholders.member(t.name):
-          conPH(t.name)
-        else:
-          print("tycon: " + fmty(t))
-          tycon(t)
-        end
-      end
-      gc(e)^bind(fun(cs):
-          print("placeholders: " + torepr(placeholders))
-          print("ps: " + torepr(ps))
+      # NOTE(dbp 2013-12-18): We have said that we cannot pass
+      # around foralls as values. This is sort of false (as list has a
+      # value in it called link that is certainly a forall), but
+      # assuming these are only done for modules and for in scope let
+      # bindings then we should have a type for what we are
+      # instantiating, and we are NOT trying to solve for it. So we
+      # look the type up and eliminate it right now. We could do this with
+      # a few cases and NOT use tc (identifiers, brackets), which is probably
+      # "the right thing to do".
+      tc(e)^bind(fun(ety):
+          fresh-ps = ps.map(fun(_): gensym("p") end)
+          fun ty-or-ph(t) -> ConTerm:
+            if is-nameType(t) and placeholders.member(t.name):
+              conPH(t.name)
+            else:
+              tycon(t)
+            end
+          end
           bind-params(placeholders,
             sequence(ps.map(get-type)))^bind(fun(_ps):
-              print("_ps: " + torepr(_ps.map(fmty)))
-              return(cs +
-                [ conEq(conExp(expr1), conApp(conVar(g), _ps.map(ty-or-ph))),
-                  conEq(conExp(e), conBigLam(fresh-ps, conApp(conVar(g), fresh-ps.map(conVar))))
+              return(
+                [ conEq(conExp(expr1), conInst(tycon(ety), _ps.map(ty-or-ph)))
                 ])
             end)
         end)
@@ -2650,6 +2655,8 @@ fun replace-term(t1 :: ConTerm, t2 :: ConTerm, cs :: List<Pair<ConTerm, ConTerm>
           conAnon(record.map(fun(p): pair(p.a, r(p.b)) end))
         | conApp(name, args) =>
           conApp(r(name), args.map(r))
+        | conInst(con, args) =>
+          conInst(r(con), args.map(r))
         | conBigLam(params, term) =>
           conBigLam(params, r(term))
         | else => td
@@ -2673,15 +2680,13 @@ fun subst-add(t1 :: ConTerm, t2 :: ConTerm, subst :: List<Pair<ConTerm, ConTerm>
 end
 fun unify(constraints :: List<Constraint>, subst :: List<Pair<ConTerm, ConTerm>>) -> List<Pair<ConTerm, ConTerm>>:
   fun is-var-type(t :: ConTerm) -> Bool:
-    is-conVar(t) or is-conExp(t) or is-conPH(t)
+    is-conVar(t) or is-conExp(t) or is-conPH(t) or is-conInst(t)
   end
   cases(List<Constraint>) constraints:
     | empty => subst
     | link(c, cs) =>
       t1 = c.t1
       t2 = c.t2
-      print("subst is " + subst.map(fun(p): fmterm(p.a) + " = " + fmterm(p.b) end).join-str(", "))
-      print("unifying " + fmterm(t1) + " = " + fmterm(t2))
       cases(ConTerm) t1:
         | conVar(id) =>
           cases(Option<ConTerm>) map-get(subst, t1):
@@ -2697,6 +2702,21 @@ fun unify(constraints :: List<Constraint>, subst :: List<Pair<ConTerm, ConTerm>>
           cases(Option<ConTerm>) map-get(subst, t1):
             | some(b) => unify(link(conEq(b, t2), cs), subst)
             | none => unify(cs, subst-add(t1, t2, subst))
+          end
+        | conInst(con, args) =>
+          if is-conInst(t2) and (args.length() == t2.args.length()):
+            unify(conEq(con, t2.con)^link(map2(conEq, args, t2.args) + cs), subst)
+          else if is-var-type(t2):
+            unify(conEq(t2, t1)^link(cs), subst)
+          else if is-conBigLam(con) and (args.length() == con.params.length()):
+            new-term = for fold(term from con.term, s from zip2(con.params, args)):
+              # TODO(dbp 2013-12-18): Should write a better replace-term helper.
+              replace-term(conName(s.a), s.b, [pair(term,term)]).first.b
+            end
+            unify(conEq(new-term, t2)^link(cs), subst)
+          else:
+            # FIXME(dbp 2013-12-11): actual location info.
+            raise(unifyError(t1, dummy-loc, t2, dummy-loc))
           end
         | conName(name1) =>
           if is-conName(t2) and (t2.name == name1):
@@ -2801,6 +2821,18 @@ fun replace-placeholders(
           | conName(n) => some(appty(n, args.map(ct-to-ty)))
           | else => none
         end
+      | conInst(con, args) =>
+        cases(ConTerm) con:
+          | conBigLam(params, term) =>
+            if args.length() <> params.length():
+              none
+            else:
+              for fold(t from term, p from zip2(args, params)):
+                replace-term(conVar(p.b), p.a, [t]).first
+              end
+            end
+          | else => none
+        end
       | conBigLam(params, term) =>
         some(bigLamType(params, ct-to-ty(term)))
       | else => none
@@ -2879,31 +2911,44 @@ end
 
 
 fun infer(expr :: A.Expr) -> TCST<A.Expr>:
-  add-placeholders(expr, false)^bind(fun(phres):
-      get-constraints(phres.b, phres.a)
-      ^bind(fun(constraints):
-          print("cons: ")
-          print(constraints.map(fmcon))
-          try:
-            subst = unify(constraints, [])
-            print("subst: ")
-            print(subst.map(fun(p): fmterm(p.a) + " = " + fmterm(p.b) + "\n" end))
-            infer-find(replace-placeholders(subst, phres.a, phres.b))
-          except(e):
-            when not is-unifyError(e):
-              raise(e)
-            end
-            print("unify error: " + torepr(e))
-            add-error(expr.l, msg(errUnification(e.t1, e.l1, e.t2, e.l2)))
-            ^seq(return(expr))
-          end
-        end)
+  # NOTE(dbp 2013-12-18): We need bindings for s_instantiate - because we need to eliminate the instantiation when
+  # we constraint solve (so we need to know the type of what we are instantiating, which is in the env).
+  get-bindings(expr)^bind(fun(bindings):
+      add-bindings(bindings.a,
+        add-datatypes(bindings.b,        
+          add-placeholders(expr, false)^bind(fun(phres):
+              get-constraints(phres.b, phres.a)
+              ^bind(fun(constraints):
+                  try:
+                    subst = unify(constraints, [])
+                    infer-find(replace-placeholders(subst, phres.a, phres.b))
+                  except(e):
+                    when not is-unifyError(e):
+                      raise(e)
+                    end
+                    add-error(expr.l, msg(errUnification(e.t1, e.l1, e.t2, e.l2)))
+                    ^seq(return(expr))
+                  end
+                end)
+            end)
+          )
+        )
     end)
 where:
   fun gen-loc(l :: Number, c :: Number) -> Loc:
     loc("gen-file", l, c)
   end
+  # x :: List<Number> = empty ===> x :: List<Number> = empty<Number>
   eval-default(infer(A.s_let(gen-loc(0,0), A.s_bind(gen-loc(0,1), "x", A.a_app(gen-loc(0,2), A.a_name(gen-loc(0,3), "List"), [A.a_name(gen-loc(0,4), "Number")])), A.s_id(gen-loc(1,0), "empty")))) is A.s_let(gen-loc(0,0), A.s_bind(gen-loc(0,1), "x", A.a_app(gen-loc(0,2), A.a_name(gen-loc(0,3), "List"), [A.a_name(gen-loc(0,4), "Number")])), A.s_instantiate(gen-loc(1,0), A.s_id(gen-loc(1,0), "empty"), [A.a_name(gen-loc(1,0), "Number")]))
+
+  # x :: List<Number> = link(10, empty<Number>) ===> x :: List<Number> = link<Number>(10, empty<Number>)
+  eval-default(infer(A.s_let(gen-loc(0,0), A.s_bind(gen-loc(0,1), "x", A.a_app(gen-loc(0,2), A.a_name(gen-loc(0,3), "List"), [A.a_name(gen-loc(0,4), "Number")])), A.s_app(gen-loc(1,0), A.s_id(gen-loc(1,1), "link"), [A.s_num(gen-loc(1,2), 10), A.s_instantiate(gen-loc(1,3), A.s_id(gen-loc(1,3), "empty"), [A.a_name(gen-loc(1,3), "Number")])])))) is
+  A.s_let(gen-loc(0,0), A.s_bind(gen-loc(0,1), "x", A.a_app(gen-loc(0,2), A.a_name(gen-loc(0,3), "List"), [A.a_name(gen-loc(0,4), "Number")])), A.s_app(gen-loc(1,0), A.s_instantiate(gen-loc(1,1), A.s_id(gen-loc(1,1), "link"), [A.a_name(gen-loc(1,1), "Number")]), [A.s_num(gen-loc(1,2), 10), A.s_instantiate(gen-loc(1,3), A.s_id(gen-loc(1,3), "empty"), [A.a_name(gen-loc(1,3), "Number")])]))
+
+  # x :: List<Number> = link(10, empty) ===> x :: List<Number> = link<Number>(10, empty<Number>)
+  eval-default(infer(A.s_let(gen-loc(0,0), A.s_bind(gen-loc(0,1), "x", A.a_app(gen-loc(0,2), A.a_name(gen-loc(0,3), "List"), [A.a_name(gen-loc(0,4), "Number")])), A.s_app(gen-loc(1,0), A.s_id(gen-loc(1,1), "link"), [A.s_num(gen-loc(1,2), 10), A.s_id(gen-loc(1,3), "empty")])))) is
+  A.s_let(gen-loc(0,0), A.s_bind(gen-loc(0,1), "x", A.a_app(gen-loc(0,2), A.a_name(gen-loc(0,3), "List"), [A.a_name(gen-loc(0,4), "Number")])), A.s_app(gen-loc(1,0), A.s_instantiate(gen-loc(1,1), A.s_id(gen-loc(1,1), "link"), [A.a_name(gen-loc(1,1), "Number")]), [A.s_num(gen-loc(1,2), 10), A.s_instantiate(gen-loc(1,3), A.s_id(gen-loc(1,3), "empty"), [A.a_name(gen-loc(1,3), "Number")])]))
+
 end
 
 fun infer-find(expr :: A.Expr) -> TCST<A.Expr>:
@@ -3649,10 +3694,10 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
 where:
   fun tc-src(src):
     stx = A.parse(src,"anonymous-file", { ["check"]: false}).with-types
-    eval(tc(stx.block), [], [], [], default-datatypes, default-env, default-type-env)
+    eval(infer(stx.block)^bind(tc), [], [], [], default-datatypes, default-env, default-type-env)
   end
   fun tc-stx(stx):
-    eval(tc(stx), [], [], [], default-datatypes, default-env, default-type-env)
+    eval(infer(stx)^bind(tc), [], [], [], default-datatypes, default-env, default-type-env)
   end
 
   tc-src("1") is nmty("Number")
