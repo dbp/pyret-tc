@@ -2796,24 +2796,25 @@ fun unify(constraints :: List<Constraint>, subst :: List<Pair<ConTerm, ConTerm>>
               end
             end
           | conAnon(record) =>
-            if is-conAnon(t2) and (record.length() == t2.record.length()):
+            # INVARIANT: right record should be width subtype of left record.
+            if is-conAnon(t2) and (record.length() >= t2.record.length()):
               keys1 = record.map(_.a)
               keys2 = t2.record.map(_.a)
-              if list.all(fun(k): keys2.member(k) end, keys1):
-                unify(keys1.map(fun(k):
-                      conEq(map-get(record).value, map-get(t2.record).value)
+              if list.all(fun(k): keys1.member(k) end, keys2):
+                unify(keys2.map(fun(k):
+                      conEq(map-get(record, k).value, map-get(t2.record, k).value)
                     end) + cs, subst)
               else:
-                if is-var-type(t2):
-                  unify(conEq(t2, t1)^link(cs), subst)
-                else:
-                  # FIXME(dbp 2013-12-11): actual location info.
-                  return(unifyError(t1, dummy-loc, t2, dummy-loc))
-                end
+                # FIXME(dbp 2013-12-11): actual location info.
+                return(unifyError(t1, dummy-loc, t2, dummy-loc))
               end
             else:
-              # FIXME(dbp 2013-12-11): actual location info.
-              return(unifyError(t1, dummy-loc, t2, dummy-loc))
+              if is-var-type(t2):
+                unify(conEq(t2, t1)^link(cs), subst)
+              else:
+                # FIXME(dbp 2013-12-11): actual location info.
+                return(unifyError(t1, dummy-loc, t2, dummy-loc))
+              end
             end
           | conApp(name, args) =>
             fun err():
