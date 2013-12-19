@@ -451,7 +451,7 @@ data TCError:
     end
 
   | errUnification(t1, l1, t2, l2) with: tostring(self):
-      "During inference, a unification error occurred. Could not match types: " + fmterm(self.t1) + " at " + torepr(self.l1) + " and " + fmterm(self.t2) + " at " + torepr(self.l1) + "."
+      "During inference, a unification error occurred. Could not match types: " + fmterm(self.t1) + " and " +  fmterm(self.t2) + " (at " + torepr(self.l1) + " and " + torepr(self.l1) + " respectively)."
     end
 end
 

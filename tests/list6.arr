@@ -1,6 +1,8 @@
 #lang pyret
 
-#! value in cases expression should have type Option<Number>, but has incompatible type Option<String>
+#! During inference, a unification error occurred. Could not match types: String and Number
+# Old error:
+# #! value in cases expression should have type Option<Number>, but has incompatible type Option<String>
 
 x = ["Foo"]
 

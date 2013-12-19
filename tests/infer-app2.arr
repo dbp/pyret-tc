@@ -1,7 +1,5 @@
 #lang pyret
 
-#! Function with type <T>(T, List<T> -> List<T>) not compatible with arguments Number, List<String>
-
-#~ 'x' had List<Number> specified as type, but type checker found Dyn
+#! During inference, a unification error occurred. Could not match types: Number and String
 
 x :: List<Number> = list.["link"](1, list.["empty"]<String>)
