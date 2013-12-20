@@ -3267,6 +3267,7 @@ fun infer-find(expr :: A.Expr) -> TCST<A.Expr>:
                       end)
                   | s_datatype(l, name, params, variants, ck) =>
                     infer-find(ck)^bind(fun(check_):
+                      bind-params(params,
                         sequence(variants.map(fun(v):
                               cases(A.Variant) v:
                                 | s_datatype_variant(l1, name1, members, constructor) =>
@@ -3296,7 +3297,7 @@ fun infer-find(expr :: A.Expr) -> TCST<A.Expr>:
                                               )))
                                       end))
                               end
-                            end))^bind(fun(variants_):
+                            end)))^bind(fun(variants_):
                             return(A.s_datatype(l, name, params, variants_, check_))
                           end)
                       end)
