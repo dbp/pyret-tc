@@ -42,14 +42,15 @@
 # restrictive, so only datatype and functions definitions should have these.)  #
 # There is subtyping for records (width and depth), and Any is the supertype   #
 # of everything. Dyn is special - it can be super or subtype, and is sufficient#
-# for replacement with any other type (this may generate warnings, but not     #
+# for replacement with any other type (this generates warnings, but not        #
 # errors). When it hits an error, the type checker keeps going, attributing    #
 # the type of the erroneous expression as Dyn.                                 #
 #                                                                              #
 # Phases:                                                                      #
-# There are three main conceptual passes to the type checker. They are:        #
+# There are four main conceptual passes to the type checker. They are:         #
 #  - binding extraction.
 #  - is inference
+#  - instantiation inference
 #  - type checking
 #
 # Binding Extraction:
@@ -67,22 +68,20 @@
 # to figure out the type of foo. This is done so that later definitions can
 # benefit from inference on earlier ones.
 #
-# Type Checking: This is mostly straightforward typechecking, with the usual
-# co/contravariance for subtyping with functions, making sure all branches of
-# if/cases have the same type, etc.  The only thing that is a bit tricky is
-# inferring instantiations for type variables.  This comes up in two ways: in
-# the application of polymorphic functions, we need to figure out any type
-# variables in the return type, so for example: fun<A> head(List<A>) -> A, when
-# applied to a List<Number>, we need to figure out that A is Number in this
-# application. The other place is in datatype. The straightforward cases is the
-# same as with functions - figuring out the type of a constructed type, like
-# link(10, list-of-numbers) :: List<Number>. The harder case is when the
-# variant does not actually mention the type variable, for example, empty. We
-# do this by normal type inference, in the local contexts where it is needed
-# (so the context of empty should allow us to instantiate the A type
-# variable). This also occurs with cases, which is almost always written
-# as cases(List), but List is a type function, not a type, so we need to infer
-# what the type of the parameter A should be.
+# Instantiation Inference: On each function body (and the top level),
+# we add placeholder variables to instantiate uninstantiated
+# parametric functions and types. (ex: empty becomes empty<PH>), and
+# then do unification over the block, solving for those placeholder
+# variables.  We actually solve for a lot of other stuff, of course
+# (and many errors are reported at this time), but right now the
+# placeholders are the only thing we take out of the inference -
+# normal type checking proceeds with the AST with explicit
+# instantiations.
+#
+# Type Checking: This is mostly straightforward typechecking, with the
+# usual co/contravariance for subtyping with functions, making sure
+# all branches of if/cases have the same type, checking that cases
+# is for valid datatypes/variants, etc.
 #
 ################################################################################
 
@@ -159,6 +158,28 @@ end
 data DataConstructor:
   | dataConstructor(name :: String, args :: List<Type>)
 end
+
+# NOTE(dbp 2013-12-19): Datatypes for unification.
+data Constraint:
+  | conEq(t1 :: ConTerm, t2 :: ConTerm)
+end
+data ConTerm:
+  | conExp(e :: A.Expr)
+  | conVar(id :: String)
+  | conPH(name :: String)
+  | conInst(con :: ConTerm, args :: List<ConTerm>)
+  | conDyn # NOTE(dbp 2013-12-18): This is just a placeholder; in unification
+           # anything with conDyn on either side is just thrown out. It allows
+           # the type -> conterm function to be total, and to work with functions
+           # that are missing annotations.
+  | conName(name :: String)
+  | conArrow(args :: List<ConTerm>, ret :: ConTerm)
+  | conMethod(self :: ConTerm, args :: List<ConTerm>, ret :: ConTerm)
+  | conAnon(record :: List<Pair<String, ConTerm>>)
+  | conApp(name :: ConTerm, args :: List<ConTerm>)
+  | conBigLam(params :: List<String>, term :: ConTerm)
+end
+
 
 # used in testing
 dummy-loc = loc("dummy-file", -1, -1)
@@ -512,8 +533,39 @@ where:
   fmty(appType("Either", [nmty("T"), nmty("U")])) is "Either<T, U>"
 end
 
+fun fmterm(t :: ConTerm) -> String:
+  doc: "This function is useful for debugging and displaying unification errors."
+  cases(ConTerm) t:
+    | conExp(e) =>
+      er = torepr(e)
+      "exp(" + torepr(e.l.line) + "," + torepr(e.l.column) + "," + er.substring(0, er.index-of("(")) + ")"
+    | conVar(id) => "var " + id
+    | conPH(name) => "ph " + name
+    | conInst(con, args) => "inst " + fmterm(con) + "<" + args.map(fmterm).join-str(",") + ">"
+    | conDyn => "Dyn*"
+    | conName(name) => name
+    | conArrow(args, ret) =>
+      "(" + args.map(fmterm).join-str(", ") + " -> " + fmterm(ret) + ")"
+    | conMethod(self, args, ret) =>
+      "(method " + fmterm(self) + ", " + args.map(fmterm).join-str(", ") + " -> " + fmterm(ret) + ")"
+    | conAnon(record) =>
+      "{" + record.map(fun(p): p.a + ": " + fmterm(p.b) end).join-str(", ") + "}"
+    | conApp(name, args) =>
+      fmterm(name) + "<" + args.map(fmterm).join-str(", ") + ">"
+    | conBigLam(params, term) =>
+      "[" + params.join-str(",") + "]" + fmterm(term)
+  end
+end
+
+fun fmcon(c :: Constraint) -> String:
+  cases(Constraint) c:
+    | conEq(t1, t2) =>
+      fmterm(t1) + " = " + fmterm(t2) + "\n"
+  end
+end
+
 ################################################################################
-# Non-typechecking related helper functions.                                   #
+# Non-typechecking related helper functions - candidates for standard library. #
 ################################################################################
 
 fun <K,V> map-get(m :: Map<K,V>, k :: K) -> Option<V>:
@@ -545,6 +597,7 @@ where:
   concat([[],[],[1]]) is [1]
 end
 
+# NOTE(dbp 2013-12-19): The next two are monadic operations on Option.
 fun<T, U> chain(o :: Option<T>, f :: (T -> Option<U>)) -> Option<U>:
   cases(Option<T>) o:
     | none => none
@@ -671,7 +724,6 @@ fun arrty(args :: List, ret) -> Type:
   arrowType(args.map(s2t), s2t(ret), moreRecord([]))
 end
 
-
 fun params-wrap(ps :: List<String>, t :: Type):
   if ps == []:
     t
@@ -705,22 +757,6 @@ fun tydyneq(t1 :: Type, t2 :: Type) -> Bool:
     | else =>
       cases(Type) t2:
         | dynType => true
-        | else => t1 == t2
-      end
-  end
-end
-
-fun tycompat(t1 :: Type, t2 :: Type) -> Bool:
-  doc: "equality with Dyn and bigLamType"
-  cases(Type) t1:
-    | dynType => true
-    | bigLamType(params, type) =>
-      not is-incompatible(tysolve(params, [pair(type, rename-params(params, params.map(nmty), [t2]).types.first)], []))
-    | else =>
-      cases(Type) t2:
-        | dynType => true
-        | bigLamType(params, type) =>
-          not is-incompatible(tysolve(params, [pair(type, t1)], []))
         | else => t1 == t2
       end
   end
@@ -863,330 +899,15 @@ fun replace(v :: Type, nt :: Type, t :: Type) -> Type:
   end
 end
 
-data TySolveRes:
-  | allSolved(l :: List<Type>)
-  | someSolved(l :: List<Type>)
-  | incompatible
-end
-
-fun tysolve(vars :: List<String>, _eqs :: List<Pair<Type, Type>>, tys :: List<Type>) -> TySolveRes:
-  doc: "Solves for vars using eqs (by constraint generation/elimination) and uses those to substitute into tys.
-        If all are not solved for, returns someSolved, where the remaining ones have been replaced with dynType.
-        In the case of incompatibility (ie, not possible to solve), returns incompatible.
-        This is how we instantiate type parameters through local inference."
-
-  fun congen(eqs :: List<Pair<Type, Type>>) -> List<Pair<String,Type>>:
-    doc: "Output are pairs of v, ty, where v is a name in vars that should equal ty"
-    fun recgen(r1 :: RecordType, r2 :: RecordType) -> List<Pair<String, Type>>:
-      fun recgen-int(f1, f2):
-        cases(List) f1:
-          | empty => empty
-          | link(p1,r) =>
-            cases(Option) map-get(f2, p1.a):
-              | none => raise(nothing)
-              | some(p2) =>
-                congen(link(pair(p1.b, p2), recgen-int(r, f2.rest)))
-            end
-        end
-      end
-      if (r1.fields.length() <> r2.fields.length()) or
-        (not list.all(fun(x): x end, r1.fields.map(_.a).map(r2.fields.map(_.a).member(_)))):
-        raise(nothing)
-      else:
-        recgen-int(r1.fields, r2.fields)
-      end
-    end
-    fun solve-nested(_params :: List<String>, _t1 :: Type, _t2 :: Type) -> List<Pair<String, Type>>:
-      to-rename = _params.filter(vars.member(_))
-      not-to-rename = _params.filter(fun(p): not vars.member(p) end)
-      # a hack in the true spirit - prefix by equal number _ as the longest identifier in vars.
-      # as long as we don't go deep (2 or 3 max), the exponential nature of this shouldn't matter.
-      max-len = vars.map(_.length()).foldr(fun(x, m): if x > m: x else: m end end, 0)
-      t1 = for fold(acc from _t1, r from to-rename):
-        replace(nmty(r), nmty("_".repeat(max-len) + r), acc)
-      end
-      t2 = for fold(acc from _t2, r from to-rename):
-        replace(nmty(r), nmty("_".repeat(max-len) + r), acc)
-      end
-      params = to-rename.map("_".repeat(max-len) + _) + not-to-rename
-      rel-vars = vars.filter(fun(v): appears(v, t1) or appears(v, t2) end)
-      cases(TySolveRes) tysolve(params + rel-vars, [pair(t1, t2)], rel-vars.map(nmty)):
-        | allSolved(inner-eqs) => zip2(rel-vars, inner-eqs)
-        | someSolved(inner-eqs) => zip2(rel-vars, inner-eqs)
-        | incompatible => raise(nothing)
-      end
-    end
-    cases(List) eqs:
-      | empty => empty
-      | link(tp, r) =>
-        cases(Pair) tp:
-          | pair(t1, t2) =>
-            if (t1 == dynType) or (t2 == dynType):
-              # dyn gives us no information about constraints.
-              congen(r)
-            else:
-              cases(Type) t1:
-                | nameType(n1) =>
-                  if vars.member(n1):
-                    link(pair(n1, t2), congen(r))
-                  else:
-                    if is-nameType(t2) and vars.member(t2.name):
-                      link(pair(t2.name, t1), congen(r))
-                    else if is-dynType(t2) or (is-nameType(t2) and (n1 == t2.name)):
-                      congen(r)
-                    else if is-bigLamType(t2):
-                      solve-nested(t2.params, t2.type, t1)
-                    else:
-                      raise(nothing)
-                    end
-                  end
-                | anonType(rec1) =>
-                  cases(Type) t2:
-                    | anonType(rec2) =>
-                      recgen(rec1, rec2) + congen(r)
-                    | bigLamType(params, type) => solve-nested(params, type, t1) + congen(r)
-                    | nameType(n2) =>
-                      if vars.member(n2):
-                        link(pair(n2, t1), congen(r))
-                      else:
-                        raise(nothing)
-                      end
-                    | else => raise(nothing)
-                  end
-                | arrowType(args1, ret1, rec1) =>
-                  cases(Type) t2:
-                    | arrowType(args2, ret2, rec2) =>
-                      if args1.length() <> args2.length():
-                        raise(nothing)
-                      else:
-                        congen(link(pair(ret1, ret2), zip2(args1, args2))) +
-                        recgen(rec1, rec2) + congen(r)
-                      end
-                    | bigLamType(params, type) => solve-nested(params, type, t1)
-                    | nameType(n2) =>
-                      if vars.member(n2):
-                        link(pair(n2, t1), congen(r))
-                      else:
-                        raise(nothing)
-                      end
-                    | else =>
-                      if is-nameType(t2) and vars.member(t2.name):
-                        link(pair(t2.name, t1), congen(r))
-                      else:
-                        raise(nothing)
-                      end
-                  end
-                | methodType(self1, args1, ret1, rec1) =>
-                  cases(Type) t2:
-                    | methodType(self2, args2, ret2, rec2) =>
-                      if args1.length() <> args2.length():
-                        raise(nothing)
-                      else:
-                        congen(link(pair(self1, self2), link(pair(ret1, ret2), zip2(args1, args2)))) +
-                        recgen(rec1, rec2) + congen(r)
-                      end
-                    | bigLamType(params, type) => solve-nested(params, type, t1)
-                    | nameType(n2) =>
-                      if vars.member(n2):
-                        link(pair(n2, t1), congen(r))
-                      else:
-                        raise(nothing)
-                      end
-                    | else =>
-                      if is-nameType(t2) and vars.member(t2.name):
-                        link(pair(t2.name, t1), congen(r))
-                      else:
-                        raise(nothing)
-                      end
-                  end
-                | appType(name1, args1) =>
-                  cases(Type) t2:
-                    | appType(name2, args2) =>
-                      if (args1.length() <> args2.length()) or (name1 <> name2):
-                        raise(nothing)
-                      else:
-                        congen(zip2(args1, args2)) + congen(r)
-                      end
-                    | bigLamType(params, type) => solve-nested(params, type, t1)
-                    | nameType(n2) =>
-                      if vars.member(n2):
-                        link(pair(n2, t1), congen(r))
-                      else:
-                        raise(nothing)
-                      end
-                    | else =>
-                      if is-nameType(t2) and vars.member(t2.name):
-                        link(pair(t2.name, t1), congen(r))
-                      else:
-                        raise(nothing)
-                      end
-                  end
-                | bigLamType(params, type) => solve-nested(params, type, t2)
-                | anyType =>
-                  if t2 == anyType:
-                    congen(r)
-                  else if is-nameType(t2) and vars.member(t2.name):
-                    link(pair(t2.name, t1), congen(r))
-                  else:
-                    raise(nothing)
-                  end
-              end
-            end
-        end
-    end
-  end
-
-  var loop-point = nothing
-
-  fun consolve(cons :: List<Pair<String, Type>>) -> List<Pair<String,Type>>:
-    doc: "Output has unique left sides, all in vars."
-    cases(List<Pair<String,Type>>) cons:
-      | empty => empty
-      | link(p, rest) =>
-        cases(Pair<String, Type>) p:
-          | pair(a, b) =>
-            if nmty(a) == b:
-              consolve(rest)
-            else if vars.member(a):
-              if appears(a, b):
-                raise(nothing)
-              else if list.any(fun(x): x end, vars.map(appears(_, b))):
-                if (not Nothing(loop-point)) and identical(loop-point, p):
-                  # don't go into infinite loops.
-                  raise(nothing)
-                else:
-                  when Nothing(loop-point):
-                    loop-point := p
-                  end
-                  consolve(rest + [p])
-                end
-              else:
-                link(pair(a, b), consolve(rest.map(fun(r):
-                        if r.a == a:
-                          if r.b == b:
-                            pair(r.a, nmty(r.a))
-                          else if is-nameType(r.b) and vars.member(r.b.name):
-                            pair(r.b.name, b)
-                          else:
-                            raise(nothing)
-                          end
-                        else:
-                          pair(r.a, replace(nmty(a), b, r.b))
-                        end
-                      end)))
-              end
-            else:
-              raise("tysolve: invariant violated - left side should be var.")
-            end
-        end
-    end
-  end
-
-  fun conreplace(sols :: List<Pair<String,Type>>, _tys :: List<Type>) -> TySolveRes:
-    replaced = for fold(acc from _tys, sol from sols):
-      acc.map(replace(nmty(sol.a), sol.b, _))
-    end
-    if list.any(fun(x): x end, replaced.map(fun(r): list.any(fun(x): x end, vars.map(appears(_, r))) end)):
-      someSolved(for fold(acc from replaced, v from vars):
-          acc.map(replace(nmty(v), dynType, _))
-        end)
-    else:
-      allSolved(replaced)
-    end
-  end
-
-  try:
-    _eqs^congen()^consolve()^conreplace(tys)
-  except(e):
-    if e == nothing:
-      incompatible
-    else:
-      raise(e)
-    end
-  end
-where:
-  tysolve(["T"], [pair(appty("Foo", ["T"]), appty("Foo", ["String"]))],
-    [appty("Bar", ["T"])]) is allSolved([appty("Bar", ["String"])])
-
-  tysolve(["T"], [pair(nmty("T"), appty("Foo", ["String"]))],
-    [appty("Bar", ["T"])]) is allSolved([appty("Bar", [appty("Foo", ["String"])])])
-
-  tysolve(["T"], [pair(appty("Foo", ["T"]), appty("Foo", ["String"])),
-    pair(nmty("T"), nmty("String"))],
-    [appty("Bar", ["T"]), nmty("U")]) is allSolved([appty("Bar", ["String"]), nmty("U")])
-
-  tysolve(["T"], [pair(nmty("T"), nmty("Number")), pair(nmty("T"), nmty("String"))], []) is incompatible
-
-  tysolve(["T", "U"], [pair(nmty("U"), nmty("Number")),
-      pair(anonType(moreRecord([pair("f", nmty("T"))])), nmty("String"))], []) is incompatible
-
-  tysolve(["T", "U"], [pair(nmty("U"), nmty("Number")),
-      pair(anonType(moreRecord([pair("f", nmty("T"))])), anonType(moreRecord([pair("f", nmty("String"))])))],
-    [nmty("U"), nmty("T")]) is allSolved([nmty("Number"), nmty("String")])
-
-  tysolve(["T", "U"], [pair(nmty("T"), nmty("U")), pair(nmty("T"), nmty("String"))], [nmty("U")])
-  is allSolved([nmty("String")])
-
-  tysolve(["T", "U"], [pair(nmty("T"), nmty("U")), pair(nmty("U"), nmty("T"))], [nmty("U")]) is incompatible
-
-  tysolve(["T", "U"], [pair(nmty("T"), nmty("U")), pair(nmty("U"), nmty("T"))], [nmty("U")]) is incompatible
-
-  tysolve(["T"], [pair(arrowType([nmty("T")], appty("Foo", ["T"]), moreRecord([])),
-        arrowType([nmty("Bool")], appty("Foo", ["String"]), moreRecord([])))], [appty("Foo", ["T"])]) is incompatible
-
-  tysolve(["T"], [pair(arrowType([nmty("T")], appty("Foo", ["T"]), moreRecord([])),
-        arrowType([nmty("Bool")], appty("Foo", ["Bool"]), moreRecord([])))], [nmty("T")]) is allSolved([nmty("Bool")])
-
-  tysolve(["T"], [pair(nmty("T"), appty("Option", ["T"]))], []) is incompatible
-
-  tysolve(["T"], [pair(nmty("String"), appty("Option", ["T"]))], []) is incompatible
-
-  tysolve(["T"], [pair(nmty("String"), appty("Option", ["Number"]))], []) is incompatible
-
-  tysolve(["T"], [pair(nmty("U"), appty("Option", ["Number"]))], [nmty("T")]) is incompatible
-
-  tysolve(["T", "U"], [pair(nmty("T"), appty("Foo", [appty("Bar", ["U"])])),
-                            pair(nmty("String"), nmty("U"))],
-    [nmty("T"), nmty("U")]) is allSolved([appty("Foo", [appty("Bar", ["String"])]), nmty("String")])
-
-  tysolve(["T"], [pair(appty("Foo", ["T"]), appty("Foo", [anyType]))], [nmty("T")]) is allSolved([anyType])
-
-  tysolve(["T", "U"], [pair(nmty("T"), nmty("String"))], [nmty("T"), nmty("U")]) is someSolved([nmty("String"), dynType])
-
-  tysolve(["U"], [pair(nmty("U"), nmty("Bool")),
-      pair(bigLamType(["T"], appty("Foo", [nmty("T")])), appty("Foo", ["String"]))], [nmty("U")])
-  is allSolved([nmty("Bool")])
-
-  tysolve(["U", "V"], [
-      pair(bigLamType(["T"], appty("Foo", [nmty("T"), nmty("V"), nmty("Bool")])), appty("Foo", ["String", "Number", "U"]))], [nmty("U"), nmty("V")])
-  is allSolved([nmty("Bool"), nmty("Number")])
-
-  tysolve(["U"], [pair(bigLamType(["T"], appty("Foo", [nmty("T"), nmty("Bool")])), appty("Foo", ["String", "U"]))], [nmty("U")])
-  is allSolved([nmty("Bool")])
-
-  tysolve(["T"], [pair(nmty("T"), nmty("Bool")),
-      pair(bigLamType(["T"], appty("Foo", [nmty("T")])), appty("Foo", ["String"]))], [nmty("T")])
-  is allSolved([nmty("Bool")])
-
-  tysolve(["T"], [pair(nmty("T"), nmty("Bool")),
-      pair(appty("Foo", ["String"]), bigLamType(["T"], appty("Foo", [nmty("T")])))], [nmty("T")])
-  is allSolved([nmty("Bool")])
-
-  tysolve([], [pair(nmty("Bool"), nmty("Bool"))], []) is allSolved([])
-  tysolve(["T"], [pair(nmty("Bool"), nmty("Bool"))], [nmty("T")]) is someSolved([dynType])
-
-  tysolve(["T"], [pair(appty("Option", [anonType(normalRecord([pair("in", nmty("Number"))]))]),
-                       appty("Option", ["T"]))], [nmty("T")]) is allSolved([anonType(normalRecord([pair("in", nmty("Number"))]))])
-end
-
-
+# NOTE(dbp 2013-12-19): This function isn't currently used... but I
+# think that's because the functionality was inadvertantly duplicated
+# in less-tested form.
 data RenameRes:
   | renameRes(params :: List<String>, types :: List<Type>)
 end
 fun rename-params(_params :: List<String>, types-appear :: List<Type>, types-rename :: List<Type>):
   doc: "renames any params that appear in types-appear in types-rename"
-  # this is a hack - we want a pool of free variables... Assuming enough of these
-  # will be free.
+  # TODO(dbp 2013-12-19): Replace this with gensym()
   fvs = builtins.string-to-list("ABCDEFGHIJKLMNOPQRSTUVWXYZ").filter(
     fun(v): not list.any(fun(x): x end, types-appear.map(appears(v,_))) end)
 
@@ -1221,7 +942,7 @@ fun bind-params(params, mv) -> TCST:
 end
 
 fun get-bindings(ast :: A.Expr) -> TCST<Trip<List<Pair<String, Type>>, List<Pair<String, DataDef>>, List<Pair<Type, TypeBinding>>>>:
-  doc: "This function implements letrec behavior."
+  doc: "This function implements letrec behavior (for bindings and datatypes)."
   fun name-val-binds(name, val):
     if A.is-a_blank(name.ann):
       cases(A.Expr) val:
@@ -1563,6 +1284,7 @@ fun is-inferred-functions(ast :: A.Expr) -> TCST<List<Pair<String, Type>>>:
           if pairs <> []:
             fun a2l(t) -> List<Type>: t.args + [t.ret] end
             tylists = pairs.map(a2l)
+            # TODO(dbp 2013-12-19): replace this with gensym().
             tyvars := builtins.string-to-list("TUVWABCDEFGHIJKLMNOPQRSXYZ").filter(
               fun(v): not list.any(fun(x): x end, tylists.map(fun(lst):
                     list.any(fun(x): x end, lst.map(appears(v,_)))
@@ -2213,7 +1935,7 @@ fun tc-branches(bs :: List<TCST<Type>>) -> TCST<TCBranchRes>:
         cases(List) btys:
           | empty => final-tys
           | link(f, r) =>
-            if (f == dynType) or (final-tys.member(f)) or list.any(fun(x): x end, final-tys.map(tycompat(_, f))):
+            if (f == dynType) or (final-tys.member(f)) or list.any(fun(x): x end, final-tys.map(tydyneq(_, f))):
               h(r, final-tys)
             else:
               h(r, link(f, final-tys))
@@ -2258,57 +1980,6 @@ end
 ################################################################################
 # Local type inference.                                                        #
 ################################################################################
-data Constraint:
-  | conEq(t1 :: ConTerm, t2 :: ConTerm)
-end
-
-fun fmterm(t :: ConTerm) -> String:
-  doc: "This function is useful for debugging and displaying unification errors."
-  cases(ConTerm) t:
-    | conExp(e) =>
-      er = torepr(e)
-      "exp(" + torepr(e.l.line) + "," + torepr(e.l.column) + "," + er.substring(0, er.index-of("(")) + ")"
-    | conVar(id) => "var " + id
-    | conPH(name) => "ph " + name
-    | conInst(con, args) => "inst " + fmterm(con) + "<" + args.map(fmterm).join-str(",") + ">"
-    | conDyn => "Dyn*"
-    | conName(name) => name
-    | conArrow(args, ret) =>
-      "(" + args.map(fmterm).join-str(", ") + " -> " + fmterm(ret) + ")"
-    | conMethod(self, args, ret) =>
-      "(method " + fmterm(self) + ", " + args.map(fmterm).join-str(", ") + " -> " + fmterm(ret) + ")"
-    | conAnon(record) =>
-      "{" + record.map(fun(p): p.a + ": " + fmterm(p.b) end).join-str(", ") + "}"
-    | conApp(name, args) =>
-      fmterm(name) + "<" + args.map(fmterm).join-str(", ") + ">"
-    | conBigLam(params, term) =>
-      "[" + params.join-str(",") + "]" + fmterm(term)
-  end
-end
-
-fun fmcon(c :: Constraint) -> String:
-  cases(Constraint) c:
-    | conEq(t1, t2) =>
-      fmterm(t1) + " = " + fmterm(t2) + "\n"
-  end
-end
-
-data ConTerm:
-  | conExp(e :: A.Expr)
-  | conVar(id :: String)
-  | conPH(name :: String)
-  | conInst(con :: ConTerm, args :: List<ConTerm>)
-  | conDyn # NOTE(dbp 2013-12-18): This is just a placeholder; in unification
-           # anything with conDyn on either side is just thrown out. It allows
-           # the type -> conterm function to be total, and to work with functions
-           # that are missing annotations.
-  | conName(name :: String)
-  | conArrow(args :: List<ConTerm>, ret :: ConTerm)
-  | conMethod(self :: ConTerm, args :: List<ConTerm>, ret :: ConTerm)
-  | conAnon(record :: List<Pair<String, ConTerm>>)
-  | conApp(name :: ConTerm, args :: List<ConTerm>)
-  | conBigLam(params :: List<String>, term :: ConTerm)
-end
 
 fun tycon(t :: Type) -> ConTerm:
   cases(Type) t:
@@ -2325,6 +1996,9 @@ fun tycon(t :: Type) -> ConTerm:
   end
 end
 
+# TODO(dbp 2013-12-19): Replace the uses of this to direct calls to add-error.
+# Previously, the unification functions were not in the state monad, so they couldn't
+# do that directly, hence this intemediary. It's not needed anymore.
 data UnifyError:
   | unifyError(t1 :: ConTerm, l1 :: Loc, t2 :: ConTerm, l2 :: Loc)
 end
@@ -3080,6 +2754,7 @@ fun infer(expr :: A.Expr) -> TCST<A.Expr>:
   # NOTE(dbp 2013-12-18): We need bindings for s_instantiate - because we need to eliminate the instantiation when
   # we constraint solve (so we need to know the type of what we are instantiating, which is in the env).
   get-bindings(expr)^bind(fun(bindings):
+      get-errors()^bind(fun(errs): # for debugging - feel free to delete
       add-bindings(bindings.a,
         add-datatypes(bindings.b,
          add-types(bindings.c,
@@ -3108,6 +2783,7 @@ fun infer(expr :: A.Expr) -> TCST<A.Expr>:
            )
           )
         )
+        end)
     end)
 where:
   fun gen-loc(l :: Number, c :: Number) -> Loc:
@@ -3146,6 +2822,7 @@ where:
 end
 
 fun infer-find(expr :: A.Expr) -> TCST<A.Expr>:
+  doc: "This function finds blocks to do inference on."
   get-type-bindings(expr)^bind(fun(newtypes):
       add-types(newtypes,
         get-bindings(expr)^bind(fun(bindings):
@@ -3336,8 +3013,6 @@ fun infer-find(expr :: A.Expr) -> TCST<A.Expr>:
 end
 
 
-
-
 ################################################################################
 # Individual cases of type checker.                                            #
 ################################################################################
@@ -3348,6 +3023,10 @@ fun tc-let(l :: Loc, name :: A.Bind, val :: A.Expr) -> TCST<Type>:
   # rule actually makes this easier, because since the iifs are
   # all top level, if we find a binding anywhere that has that
   # name, it must be the function.
+  # TODO(dbp 2013-12-19): This should be removed, because
+  # this means that a program with shadowing will confuse the type checker
+  # (even if it would cause an error in compile, presumably you type check
+  # before compile.)
   get-type(name.ann)^bind(fun(bindty):
       get-iifs()^bind(fun(iifs):
           cases(option.Option) map-get(iifs, name.id):
