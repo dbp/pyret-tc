@@ -104,10 +104,9 @@ loc = error.location
 
 data Pair:
   | pair(a,b)
-sharing:
-  _equals(self, other):
-    is-pair(other) and (self.a == other.a) and (self.b == other.b)
-  end
+end
+data Trip:
+  | trip(a,b,c)
 end
 
 data TypeError:
@@ -1221,7 +1220,7 @@ fun bind-params(params, mv) -> TCST:
       end), mv)
 end
 
-fun get-bindings(ast :: A.Expr) -> TCST<Pair<List<Pair<String, Type>>, List<Pair<String, DataDef>>>>:
+fun get-bindings(ast :: A.Expr) -> TCST<Trip<List<Pair<String, Type>>, List<Pair<String, DataDef>>, List<Pair<Type, TypeBinding>>>>:
   doc: "This function implements letrec behavior."
   fun name-val-binds(name, val):
     if A.is-a_blank(name.ann):
@@ -1230,7 +1229,7 @@ fun get-bindings(ast :: A.Expr) -> TCST<Pair<List<Pair<String, Type>>, List<Pair
           bind-params(ps,
             sequence(args.map(fun(b): get-type(b.ann) end))^bind(fun(arg-tys):
                 get-type(ann)^bind(fun(ret-ty):
-                    return(pair([pair(name.id, params-wrap(ps, arrowType(arg-tys, ret-ty, moreRecord([]))))], []))
+                    return(trip([pair(name.id, params-wrap(ps, arrowType(arg-tys, ret-ty, moreRecord([]))))], [], []))
                   end)
               end)
             )
@@ -1239,22 +1238,27 @@ fun get-bindings(ast :: A.Expr) -> TCST<Pair<List<Pair<String, Type>>, List<Pair
           # it if it is something simple (like a number, string, application),
           # but not if it can have things like functions in it.
           add-bindings([pair(name.id, dynType)],
-            tc(val)^bind(fun(ty): return(pair([pair(name.id, ty)], [])) end))
+            tc(val)^bind(fun(ty):
+                return(trip([pair(name.id, ty)], [], []))
+              end))
       end
     else:
-      get-type(name.ann)^bind(fun(ty): return(pair([pair(name.id, ty)], [])) end)
+      get-type(name.ann)^bind(fun(ty): return(trip([pair(name.id, ty)], [], [])) end)
     end
   end
   cases(A.Expr) ast:
     | s_block(l, stmts) =>
       get-env()^bind(fun(start-env):
-          get-datatypes()^bind(fun(start-dt):
-              for foldm(cur from pair([], []), stmt from stmts):
-                get-bindings(stmt)^bind(fun(new-binds):
-                  put-env(new-binds.a + cur.a + start-env)
-                  ^seq(put-datatypes(new-binds.b + cur.b + start-dt))
-                  ^seq(return(pair(new-binds.a + cur.a, new-binds.b + cur.b))) end)
-              end
+          get-type-env()^bind(fun(start-type-env):
+              get-datatypes()^bind(fun(start-dt):
+                  for foldm(cur from trip([], [], []), stmt from stmts):
+                    get-bindings(stmt)^bind(fun(new-binds):
+                        put-env(new-binds.a + cur.a + start-env)
+                        ^seq(put-datatypes(new-binds.b + cur.b + start-dt))
+                          ^seq(put-type-env(new-binds.c + cur.c + start-type-env))
+                      ^seq(return(trip(new-binds.a + cur.a, new-binds.b + cur.b, new-binds.c + cur.c))) end)
+                  end
+                end)
             end)
         end)
     | s_user_block(l, block) => get-bindings(block)
@@ -1271,18 +1275,24 @@ fun get-bindings(ast :: A.Expr) -> TCST<Pair<List<Pair<String, Type>>, List<Pair
       bind-params(params,
         sequence(variants.map(get-variant-bindings(name, params, _)))^bind(fun(_vbs):
             vbs = unzip2(_vbs)
-            return(pair(vbs.a^concat() + [pair(name, params-wrap(params, arrowType([anyType], nmty("Bool"), moreRecord([]))))], [pair(name, dataDef(name, params, vbs.b^concat()))]))
+            # TODO(dbp 2013-12-19): Get common fields out and put them in the type record
+            new-types = if params == []:
+              [pair(nmty(name), typeNominal(anonType(moreRecord([]))))]
+            else:
+              [pair(nmty(name), typeAlias(bigLamType(params, nmty(name)))), pair(bigLamType(params, nmty(name)), typeNominal(anonType(moreRecord([]))))]
+            end
+            return(trip(vbs.a^concat() + [pair(name, params-wrap(params, arrowType([anyType], nmty("Bool"), moreRecord([]))))], [pair(name, dataDef(name, params, vbs.b^concat()))], new-types))
           end)
         )
-    | else => return(pair([], []))
+    | else => return(trip([], [], []))
   end
 where:
   fun gb-src(src):
     eval(get-bindings(A.parse(src,"anonymous-file", { ["check"]: false}).with-types.block), [], [], [], [], [], default-type-env)
   end
-  gb-src("x = 2") is pair([pair("x", nmty("Number"))], [])
-  gb-src("x = 2 y = x") is pair([ pair("y", nmty("Number")),
-      pair("x", nmty("Number"))], [])
+  gb-src("x = 2") is trip([pair("x", nmty("Number"))], [], [])
+  gb-src("x = 2 y = x") is trip([ pair("y", nmty("Number")),
+      pair("x", nmty("Number"))], [], [])
 end
 
 fun get-variant-bindings(tname :: String, tparams :: List<String>, variant :: A.Variant(fun(v):
@@ -1825,7 +1835,7 @@ fun subtype(l :: Loc, _child :: Type, _parent :: Type) -> TCST<Bool>:
             subtype(l, childtype, parenttype)^bind(fun(st): return(st and (parentparams == childparams)) end)
           | else =>
             if parentparams == []:
-              subtype(child, parenttype)
+              subtype(l, child, parenttype)
             else:
               return(false)
             end
@@ -2169,7 +2179,7 @@ fun tc-main(p, s):
   # NOTE(dbp 2013-11-03): This is sort of crummy. Need to get bindings first, for use
   # with inferring functions, but then will do this again when we start type checking...
   bindings = eval(get-bindings(stx.with-types.block), [], [], [], default-datatypes, default-env, default-type-env)
-  iifs = eval(is-inferred-functions(stx.pre-desugar.block), [], [], [], bindings.b + default-datatypes, bindings.a + default-env, default-type-env)
+  iifs = eval(is-inferred-functions(stx.pre-desugar.block), [], [], [], bindings.b + default-datatypes, bindings.a + default-env, bindings.c + default-type-env)
   run(infer(stx.with-types.block)^bind(fun(ast):
         tc(ast)
       end), [], [], iifs, default-datatypes, default-env, default-type-env)
@@ -3072,6 +3082,7 @@ fun infer(expr :: A.Expr) -> TCST<A.Expr>:
   get-bindings(expr)^bind(fun(bindings):
       add-bindings(bindings.a,
         add-datatypes(bindings.b,
+         add-types(bindings.c,
           add-placeholders(expr, false)^bind(fun(phres):
               if phres.a.length() == 0:
                 infer-find(expr)
@@ -3094,6 +3105,7 @@ fun infer(expr :: A.Expr) -> TCST<A.Expr>:
                   end)
               end
             end)
+           )
           )
         )
     end)
@@ -3139,6 +3151,7 @@ fun infer-find(expr :: A.Expr) -> TCST<A.Expr>:
         get-bindings(expr)^bind(fun(bindings):
             add-bindings(bindings.a,
               add-datatypes(bindings.b,
+                add-types(bindings.c,
                 cases(A.Expr) expr:
                   | s_block(l, exprs) =>
                     sequence(exprs.map(infer-find))^bind(fun(_exprs):
@@ -3314,6 +3327,7 @@ fun infer-find(expr :: A.Expr) -> TCST<A.Expr>:
                   | else => raise("infer-find: no case matched for: " + torepr(expr))
                 end
                 )
+               )
               )
           end)
         )
@@ -3694,6 +3708,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
         get-bindings(ast)^bind(fun(bindings):
             add-bindings(bindings.a,
               add-datatypes(bindings.b,
+                add-types(bindings.c,
                 cases(A.Expr) ast:
                   | s_block(l, stmts) =>
                     sequence(stmts.map(tc))^bind(
@@ -3802,6 +3817,7 @@ fun tc(ast :: A.Expr) -> TCST<Type>:
                   | else => raise("tc: no case matched for: " + torepr(ast))
                 end
                 )
+               )
               )
           end
           )
