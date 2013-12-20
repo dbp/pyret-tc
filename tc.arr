@@ -553,6 +553,43 @@ fun<T, U> chain(o :: Option<T>, f :: (T -> Option<U>)) -> Option<U>:
   end
 end
 
+fun<T> all-options(o :: List<Option<T>>) -> Option<List<T>>:
+  cases(List<Option<T>>) o:
+    | empty => some([])
+    | link(f, r) =>
+      cases(Option<T>) f:
+        | none => none
+        | some(t) =>
+          cases(Option<T>) all-options(r):
+            | none => none
+            | some(l) => some(t^link(l))
+          end
+      end
+  end
+where:
+  all-options([]) is some([])
+  all-options([some(1), some(2)]) is some([1,2])
+  all-options([none]) is none
+  all-options([some(1), some(2), none, some(3)]) is none
+end
+
+fun<T> cat-options(os :: List<Option<T>>) -> List<T>:
+  cases(List<Option<T>>) os:
+    | empty => []
+    | link(f, r) =>
+      cases(Option<T>) f:
+        | none => cat-options(r)
+        | some(t) => t^link(cat-options(r))
+      end
+  end
+where:
+  cat-options([]) is []
+  cat-options([none]) is []
+  cat-options([some(1), none]) is [1]
+  cat-options([some(1), none, some(2), none]) is [1,2]
+end
+
+
 fun ordinalize(n :: Number) -> String:
   if (n > 10) and (n < 21):
     tostring(n) + "th"
@@ -2678,7 +2715,7 @@ fun replace-term(t1 :: ConTerm, t2 :: ConTerm, cs :: List<Pair<ConTerm, ConTerm>
 end
 fun subst-add(t1 :: ConTerm, t2 :: ConTerm, subst :: List<Pair<ConTerm, ConTerm>>) -> List<Pair<ConTerm, ConTerm>>:
   cases(Option<ConTerm>) map-get(subst, t2):
-    | none => 
+    | none =>
       link(pair(t1, t2), replace-term(t1, t2, subst))
     | some(t3) =>
       link(pair(t1, t3), replace-term(t1, t3, subst))
@@ -2767,7 +2804,7 @@ fun unify(constraints :: List<Constraint>, subst :: List<Pair<ConTerm, ConTerm>>
                           raise(e)
                         end
                       end
-                  end 
+                  end
                 end)
             else:
               err()
@@ -2901,14 +2938,24 @@ fun replace-placeholders(
       | conDyn => some(dynType)
       | conName(name) => some(nmty(name))
       | conArrow(args, ret) =>
-        some(arrty(args.map(ct-to-ty), ct-to-ty(ret)))
+        all-options(args.map(ct-to-ty))^chain(fun(_args):
+            ct-to-ty(ret)^chain(fun(_ret):
+                some(arrty(_args, _ret))
+              end)
+          end)
       | conMethod(self, args, ret) =>
-        some(methodType(ct-to-ty(self), args.map(ct-to-ty), ct-to-ty(ret)))
+        all-options(args.map(ct-to-ty))^chain(fun(_args):
+            ct-to-ty(ret)^chain(fun(_ret):
+                ct-to-ty(self)^chain(fun(_self):
+                    some(methodType(_self, _args, _ret))
+                  end)
+              end)
+          end)
       | conAnon(record) =>
         cases(Option) (for fold(flds from some([]), p from record):
                 cases(Option) flds:
                   | none => none
-                  | some(flds1) => 
+                  | some(flds1) =>
                     cases(Option) ct-to-ty(p.b):
                       | none => none
                       | some(t) => some(pair(p.a, t)^link(flds1))
@@ -2917,11 +2964,11 @@ fun replace-placeholders(
               end):
           | none => none
           | some(flds) =>
-            some(anonType(normalRecord(flds)))
+            some(anonType(normalRecord(flds.reverse())))
         end
       | conApp(name, args) =>
         cases(ConTerm) name:
-          | conName(n) => some(appty(n, args.map(ct-to-ty)))
+          | conName(n) => all-options(args.map(ct-to-ty))^chain(fun(_args): some(appty(n, _args)) end)
           | else => none
         end
       | conInst(con, args) =>
@@ -2937,7 +2984,7 @@ fun replace-placeholders(
           | else => none
         end
       | conBigLam(params, term) =>
-        some(bigLamType(params, ct-to-ty(term)))
+        ct-to-ty(term)^chain(fun(_term): some(bigLamType(params, _term)) end)
       | else => none
     end
   end
@@ -3024,20 +3071,19 @@ fun infer(expr :: A.Expr) -> TCST<A.Expr>:
   # we constraint solve (so we need to know the type of what we are instantiating, which is in the env).
   get-bindings(expr)^bind(fun(bindings):
       add-bindings(bindings.a,
-        add-datatypes(bindings.b,        
+        add-datatypes(bindings.b,
           add-placeholders(expr, false)^bind(fun(phres):
               if phres.a.length() == 0:
-                return(expr)
+                infer-find(expr)
               else:
                 get-constraints(phres.b, phres.a)
                 ^bind(fun(constraints):
                     unify(constraints, [])^bind(fun(subst):
                         if is-unifyError(subst):
                           add-error(expr.l, msg(errUnification(subst.t1, subst.l1, subst.t2, subst.l2)))
-                          ^seq(block:
+                          ^bind(fun(_):
                               dummy-subst = phres.a.map(fun(p): pair(conPH(p), conDyn) end)
                               replaced = replace-placeholders(dummy-subst, phres.a, phres.b)
-
                               infer-find(replaced)
                             end)
                         else:
@@ -3055,6 +3101,12 @@ where:
   fun gen-loc(l :: Number, c :: Number) -> Loc:
     loc("gen-file", l, c)
   end
+  # NOTE(dbp 2013-12-19): These tests _suck_ in terms of verbosity,
+  # but I'd need to write a ast comparison that ignores locations
+  # (like jpolitz has in racket), because the locations of the
+  # instantiate nodes will be different than when you write them in
+  # syntax.
+
   # x :: List<Number> = empty ===> x :: List<Number> = empty<Number>
   eval-default(infer(A.s_let(gen-loc(0,0), A.s_bind(gen-loc(0,1), "x", A.a_app(gen-loc(0,2), A.a_name(gen-loc(0,3), "List"), [A.a_name(gen-loc(0,4), "Number")])), A.s_id(gen-loc(1,0), "empty")))) is A.s_let(gen-loc(0,0), A.s_bind(gen-loc(0,1), "x", A.a_app(gen-loc(0,2), A.a_name(gen-loc(0,3), "List"), [A.a_name(gen-loc(0,4), "Number")])), A.s_instantiate(gen-loc(1,0), A.s_id(gen-loc(1,0), "empty"), [A.a_name(gen-loc(1,0), "Number")]))
 
@@ -3069,6 +3121,15 @@ where:
   # link(10, empty) ===> link<Number>(10, empty<Number>)
   eval-default(infer(A.s_app(gen-loc(1,0), A.s_id(gen-loc(1,1), "link"), [A.s_num(gen-loc(1,2), 10), A.s_id(gen-loc(1,3), "empty")]))) is
   A.s_app(gen-loc(1,0), A.s_instantiate(gen-loc(1,1), A.s_id(gen-loc(1,1), "link"), [A.a_name(gen-loc(1,1), "Number")]), [A.s_num(gen-loc(1,2), 10), A.s_instantiate(gen-loc(1,3), A.s_id(gen-loc(1,3), "empty"), [A.a_name(gen-loc(1,3), "Number")])])
+
+  # var x :: List<{in :: Number, out :: Number}> = empty ===> var x :: List<{in :: Number, out :: Number}> = empty<{in :: Number, out :: Number}>
+  eval-default(infer(A.s_var(gen-loc(0,0), A.s_bind(gen-loc(0,1), "x", A.a_app(gen-loc(0,2), A.a_name(gen-loc(0,3), "List"), [A.a_record(gen-loc(0,4), [A.a_field(gen-loc(0,5), "in", A.a_name(gen-loc(0,6), "Number")), A.a_field(gen-loc(0,5), "out", A.a_name(gen-loc(0,6), "Number"))])])), A.s_id(gen-loc(1,0), "empty")))) is
+  A.s_var(gen-loc(0,0), A.s_bind(gen-loc(0,1), "x", A.a_app(gen-loc(0,2), A.a_name(gen-loc(0,3), "List"), [A.a_record(gen-loc(0,4), [A.a_field(gen-loc(0,5), "in", A.a_name(gen-loc(0,6), "Number")), A.a_field(gen-loc(0,5), "out", A.a_name(gen-loc(0,6), "Number"))])])),  A.s_instantiate(gen-loc(1,0), A.s_id(gen-loc(1,0), "empty"), [A.a_record(gen-loc(1,0), [A.a_field(gen-loc(1,0), "in", A.a_name(gen-loc(1,0), "Number")), A.a_field(gen-loc(1,0), "out", A.a_name(gen-loc(1,0), "Number"))])]))
+
+
+  # fun foo(): x :: List<Number> = empty end ===> fun foo(): x :: List<Number> = empty<Number> end
+  eval-default(infer(A.s_lam(gen-loc(0,0), [], [], A.a_blank, "", A.s_let(gen-loc(1,0), A.s_bind(gen-loc(1,1), "x", A.a_app(gen-loc(1,2), A.a_name(gen-loc(1,3), "List"), [A.a_name(gen-loc(1,4), "Number")])), A.s_id(gen-loc(2,0), "empty")), A.s_block(gen-loc(3,0), [])))) is
+  A.s_lam(gen-loc(0,0), [], [], A.a_blank, "", A.s_let(gen-loc(1,0), A.s_bind(gen-loc(1,1), "x", A.a_app(gen-loc(1,2), A.a_name(gen-loc(1,3), "List"), [A.a_name(gen-loc(1,4), "Number")])), A.s_instantiate(gen-loc(2,0), A.s_id(gen-loc(2,0), "empty"), [A.a_name(gen-loc(2,0), "Number")])), A.s_block(gen-loc(3,0), []))
 
 end
 
@@ -3092,7 +3153,7 @@ fun infer-find(expr :: A.Expr) -> TCST<A.Expr>:
                   | s_let(l, r, val) =>
                     infer-find(val)^bind(fun(e): return(A.s_let(l, r, e)) end)
                   | s_assign(l, n, val) =>
-                    infer-find(val)^bind(fun(e): return(A.s_assign(l, n, _)) end)
+                    infer-find(val)^bind(fun(e): return(A.s_assign(l, n, e)) end)
                   | s_if_else(l, branches, elsebranch) =>
                     sequence(branches.map(fun(b):
                           infer-find(b.test)^bind(fun(bt):
@@ -3198,10 +3259,10 @@ fun infer-find(expr :: A.Expr) -> TCST<A.Expr>:
                                 | s_datatype_variant(l1, name1, members, constructor) =>
                                   sequence(members.map(fun(m):
                                         get-type(m.bind.ann)^bind(fun(t):
-                                            pair(m.bind.id, t)
+                                            return(pair(m.bind.id, t))
                                           end)
                                       end))^bind(fun(membertys):
-                                      add-bindings([pair(constructor.self, anonType(membertys))],
+                                      add-bindings([pair(constructor.self, anonType(normalRecord(membertys)))],
                                         infer(constructor.body)^bind(fun(cb):
                                             return(A.s_datatype_variant(l1, name1, members,
                                                 A.s_datatype_constructor(
@@ -3260,91 +3321,6 @@ fun infer-find(expr :: A.Expr) -> TCST<A.Expr>:
 end
 
 
-# fun infer-let(const, l :: Loc, bnd :: A.Bind, val_ :: A.Expr) -> TCST<A.Expr>:
-#   infer(val_)^bind(fun(val):
-#       get-type(bnd.ann)^bind(fun(aty):
-#           tc(val)^bind(fun(vty):
-#               if is-bigLamType(vty):
-#                 rr = rename-params(vty.params, [aty], [vty.type])
-#                 cases(TySolveRes) tysolve(rr.params, [pair(rr.types.first, aty)], rr.params.map(nmty)):
-#                   | allSolved(vs) =>
-#                     return(const(l, bnd, A.s_instantiate(l, val, vs.map(unget-type(_, l)))))
-#                   | else =>
-#                     return(const(l, bnd, val))
-#                 end
-#               else:
-#                 return(const(l, bnd, val))
-#               end
-#             end)
-#         end)
-#     end)
-# end
-
-# fun infer-app(l :: Loc, fn :: A.Expr, args :: List<A.Expr>) -> TCST<A.Expr>:
-#   tc(fn)^bind(fun(fn-ty):
-#       if is-bigLamType(fn-ty) and is-arrowType(fn-ty.type):
-#         sequence(args.map(tc))^bind(fun(arg-vals):
-#             renamed-arg-vals = rename-params(fn-ty.params, arg-vals, arg-vals).types
-#             fun arg-inst(params, stx, vty, _aty):
-#               doc: "wrap stx in s_instantiate if needed"
-#               if is-bigLamType(vty):
-#                 aty = for fold(b from _aty, p from zip2(params, fn-ty.params)):
-#                   replace(nmty(p.b), p.a, b)
-#                 end
-#                 cases(TySolveRes) tysolve(vty.params, [pair(vty.type, aty)], vty.params.map(nmty)):
-#                   | allSolved(vs) =>
-#                     return(A.s_instantiate(stx.l, stx, vs.map(unget-type(_, stx.l))))
-#                   | someSolved(vs) =>
-#                     add-warning(l, wmsg(warnInferredTypeParametersIncomplete(vs)))
-#                     ^seq(
-#                       return(A.s_instantiate(stx.l, stx, vs.map(unget-type(_, stx.l)))))
-#                   | incompatible =>
-#                     raise("infer: an arg could not be unified with its type, even when all the args unified, which means there is a bug in the type checker, as this shouldn't be able to happen.")
-#                 end
-#               else:
-#                 return(stx)
-#               end
-#             end
-#             cases(TySolveRes) tysolve(
-#                   fn-ty.params,
-#                   zip2(fn-ty.type.args, renamed-arg-vals),
-#                   fn-ty.params.map(nmty)):
-#               | allSolved(vs) =>
-#                 sequence(map3(
-#                     arg-inst(vs,_,_,_),
-#                     args,
-#                     renamed-arg-vals,
-#                     fn-ty.type.args))^bind(fun(args-instantiated):
-#                     return(A.s_app(l, A.s_instantiate(l, fn,
-#                           vs.map(unget-type(_, l))),
-#                         args-instantiated))
-#                   end)
-#               | someSolved(vs) =>
-#                 add-warning(l, wmsg(warnInferredTypeParametersIncomplete(vs)))
-#                 ^seq(
-#                   sequence(map3(
-#                       arg-inst(vs,_,_,_),
-#                       args,
-#                       renamed-arg-vals,
-#                       fn-ty.type.args))^bind(fun(args-instantiated):
-#                       return(A.s_app(l,
-#                           A.s_instantiate(l,
-#                             fn,
-#                             vs.map(unget-type(_, l))),
-#                           args-instantiated))
-#                     end))
-#               | incompatible =>
-#                 add-error(l, msg(errFunctionArgumentsIncompatible(fn-ty, arg-vals)))^seq(
-#                   return(A.s_app(l, A.s_instantiate(l, fn,
-#                         fn-ty.params.map(fun(_): dynType end).map(unget-type(_, l))),
-#                       args)))
-#             end
-#           end)
-#       else:
-#         return(A.s_app(l, fn, args))
-#       end
-#     end)
-# end
 
 
 ################################################################################
@@ -3840,7 +3816,6 @@ where:
   fun tc-stx(stx):
     eval(infer(stx)^bind(tc), [], [], [], default-datatypes, default-env, default-type-env)
   end
-
   tc-src("1") is nmty("Number")
   tc-src("[1]") is appty("List", ["Number"])
   tc-src("[1,2,3]") is appty("List", ["Number"])
